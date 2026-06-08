@@ -41,6 +41,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var rotationObservation: NSKeyValueObservation?
 
     private let embedder = FaceEmbedder()
+    private let pad = PADClassifier()                 // 反欺骗 CNN(模型缺失=nil,自动降级为纯深度)
     private let engine: FaceEngineBridge
     private var lastProcess = Date.distantPast
     private let interval: TimeInterval = 0.14
@@ -356,7 +357,7 @@ extension CameraModel {
         return name
     }
 
-    /// 视频(可选深度)→ 检测/识别/活体 → 发布
+    /// 视频(可选深度)→ 检测 → 深度活体 + 识别 → 主脸 CNN 反欺骗融合 → 发布
     fileprivate func process(sampleBuffer: CMSampleBuffer, depthMap: CVPixelBuffer?) {
         let now = Date()
         if now.timeIntervalSince(lastProcess) < interval { return }
@@ -371,60 +372,53 @@ extension CameraModel {
         try? handler.perform([request])
         let observations = request.results ?? []
 
-        var built: [(box: CGRect, label: String, recognized: Bool, live: Bool?)] = []
-        var names: [String?] = []
-        var vecs: [[Float]?] = []
+        // 第一遍:每张脸的框 / 深度活体 / 识别结果 / 录入向量
+        var boxes: [CGRect] = []
+        var live: [Bool?] = []
+        var depthInfo: [(Float, Float)?] = []
+        var mName: [String?] = []
+        var mScore: [Float?] = []
+        var hasEmbed: [Bool] = []
+        var qvecs: [[Float]?] = []
         var maxIdx = -1; var maxArea: CGFloat = -1
-        var dbg = ""
 
         for (i, obs) in observations.enumerated() {
             let nb = obs.boundingBox
             let area = nb.width * nb.height
             if area > maxArea { maxArea = area; maxIdx = i }
 
-            // 深度活体(每张脸)
-            var live: Bool? = nil
+            var dl: Bool? = nil; var di: (Float, Float)? = nil
             if let dm = depthMap, let (isLive, rng, res) = depthLiveness(dm, faceBox: nb) {
-                live = isLive
-                if area >= maxArea { dbg = String(format: "深度 range=%.3f res=%.3f → %@", rng, res, isLive ? "真人" : "平面") }
+                dl = isLive; di = (rng, res)
             }
-
-            var label = "模型未加载"
-            var recognized = false
-            var nm: String? = nil
-            var qvec: [Float]? = nil
-
+            var nm: String? = nil; var ms: Float? = nil; var emb = false; var qv: [Float]? = nil
             if let embedder, let pts = landmarkPoints(obs, bufW: bufW, bufH: bufH),
                let vec = embedder.embedAligned(pixelBuffer: pixelBuffer, src5: pts) {
-                let match = engine.findBest(vec.map { NSNumber(value: $0) })
-                let hit = (match?.score ?? -2) >= threshold
-                if let m = match {
-                    let liveMark = live == true ? " ·活体" : (live == false ? " ·假体⚠" : "")
-                    if hit {
-                        // 门控模式:假体不给身份
-                        if gateMode && live == false {
-                            label = "假体 ⚠"; recognized = false
-                        } else {
-                            label = String(format: "%@ %.2f%@", m.name, m.score, liveMark)
-                            recognized = !(gateMode && live == false)
-                            nm = recognized ? m.name : nil
-                        }
-                    } else {
-                        label = String(format: "陌生人 %.2f%@", m.score, liveMark)
-                    }
-                } else {
-                    label = "库为空"
-                }
-                if qualityOK(obs) { qvec = vec }
-            } else {
-                label = "靠近 · 正对镜头"
+                emb = true
+                if let m = engine.findBest(vec.map { NSNumber(value: $0) }) { nm = m.name; ms = m.score }
+                if qualityOK(obs) { qv = vec }
             }
-            built.append((nb, label, recognized, live)); names.append(nm); vecs.append(qvec)
+            boxes.append(nb); live.append(dl); depthInfo.append(di)
+            mName.append(nm); mScore.append(ms); hasEmbed.append(emb); qvecs.append(qv)
+        }
+
+        // CNN 反欺骗:只跑主脸(开销大),与深度做「与」融合(都说活体才算活体)
+        var dbg = ""
+        if maxIdx >= 0 {
+            if let (rng, res) = depthInfo[maxIdx] {
+                dbg = String(format: "深度 res=%.3f range=%.3f", res, rng)
+            }
+            if let pad, let sp = pad.spoofProbability(pixelBuffer: pixelBuffer, normalizedBox: boxes[maxIdx]) {
+                let cnnLive = sp < 0.5
+                let dl = live[maxIdx]
+                live[maxIdx] = (dl == nil) ? cnnLive : (dl! && cnnLive)
+                dbg += String(format: "  CNN spoof=%.2f", sp)
+            }
         }
 
         updateLiveness(primary: maxIdx >= 0 ? observations[maxIdx] : nil)
 
-        if burstRemaining > 0, maxIdx >= 0, let v = vecs[maxIdx] {
+        if burstRemaining > 0, maxIdx >= 0, let v = qvecs[maxIdx] {
             burstVecs.append(v)
             burstRemaining -= 1
             if burstRemaining == 0 {
@@ -433,11 +427,39 @@ extension CameraModel {
             }
         }
 
-        if maxIdx >= 0, let sm = smoothedName(names[maxIdx]) {
-            built[maxIdx].label = sm + " ✓"
+        // 第二遍:用融合后的活体合成标签 / 门控
+        var built: [(box: CGRect, label: String, recognized: Bool, live: Bool?)] = []
+        var primaryName: String? = nil
+        for i in 0..<observations.count {
+            let lv = live[i]
+            let mark = lv == true ? " ·活体" : (lv == false ? " ·假体⚠" : "")
+            var label = "靠近 · 正对镜头"
+            var recognized = false
+            if !hasEmbed[i] {
+                label = "靠近 · 正对镜头"
+            } else if let ms = mScore[i], let nm = mName[i] {
+                if ms >= threshold {
+                    if gateMode && lv == false { label = "假体 ⚠"; recognized = false }
+                    else {
+                        label = String(format: "%@ %.2f%@", nm, ms, mark)
+                        recognized = true
+                        if i == maxIdx { primaryName = nm }
+                    }
+                } else {
+                    label = String(format: "陌生人 %.2f%@", ms, mark)
+                }
+            } else {
+                label = "库为空"
+            }
+            built.append((boxes[i], label, recognized, lv))
+        }
+
+        // 时序防闪烁(主脸);门控下假体不覆盖姓名
+        var sm: String? = nil
+        if maxIdx >= 0 { sm = smoothedName(primaryName) } else { _ = smoothedName(nil) }
+        if maxIdx >= 0, let sm, !(gateMode && built[maxIdx].live == false) {
+            built[maxIdx].label = sm + (built[maxIdx].live == true ? " ✓活体" : " ✓")
             built[maxIdx].recognized = true
-        } else if maxIdx < 0 {
-            _ = smoothedName(nil)
         }
 
         DispatchQueue.main.async { [weak self] in
