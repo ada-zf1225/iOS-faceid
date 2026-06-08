@@ -37,7 +37,7 @@ What makes this more than a wrapper around a pretrained model:
 | 💾 On-device enrollment | Tap to enroll; persisted locally, survives relaunch |
 | 📸 Multi-shot enrollment | One tap captures several quality-gated frames → multiple templates per person → better recall across pose/glasses |
 | 👤 Identity management | List enrolled people, rename, swipe-to-delete (no more clear-all only) |
-| 👁 Passive liveness | Blink detection (eye-aspect-ratio over frames) gates enrollment — blocks holding up a static photo |
+| 🛡️ Anti-spoofing | Two-signal liveness on the recognition path: **TrueDepth planarity** (defeats flat photo *and* video replay) fused with a **self-trained RGB CNN** (CelebA-Spoof, 99.9% val). Display or gated mode. Blink gates enrollment. |
 | ✅ Quality gate + smoothing | Rejects too-far / off-angle faces at enroll; temporal vote stabilizes the on-screen label |
 | 🎚️ Tunable threshold | Live cosine-similarity threshold slider for FAR/FRR trade-off |
 | 🔒 Fully offline | No network calls; embeddings + database never leave the device |
@@ -78,6 +78,24 @@ flowchart LR
 
 The C++ core has **zero Apple dependencies** — that's deliberate. See [`training/`](training/) for how the model was made and [`tools/`](tools/) for the export pipeline.
 
+## Liveness & anti-spoofing
+
+Recognizing a face isn't enough — a printed photo or a **video of someone blinking** replayed on a
+phone would otherwise pass. The app fuses two independent signals per face and shows **"who + 活体
+/ 假体⚠"**:
+
+1. **TrueDepth planarity (primary defense).** The front depth camera gives a depth map; the app
+   least-squares-fits a plane to the face region and measures the residual. A real face is
+   non-planar (nose protrudes → high residual); a photo or a screen is a **plane**, even when
+   tilted (low residual). This defeats flat **video replay**, which blink detection cannot.
+2. **Self-trained RGB CNN (learned cue).** A MobileNetV3 trained from scratch on CelebA-Spoof
+   (live vs. spoof, **99.9%** val accuracy) catches screen moiré / print texture and works on
+   devices without a depth camera. See [`training/antispoof/`](training/antispoof/).
+
+`live ⇔ depth-says-3D AND cnn-says-live`. A **toggle** switches between *display-only* and *gated*
+(a spoof is never given an identity). Blink detection additionally gates **enrollment**. On devices
+without TrueDepth the app degrades gracefully to the CNN + blink.
+
 ## Build & run
 
 > Requires a **physical iOS device** (the recognition pipeline needs a real camera) running iOS 18.5+, **Xcode 16.4+**, and **Git LFS** (the Core ML weights are stored in LFS).
@@ -108,10 +126,12 @@ FaceID/
 │   ├── CameraModel.swift            camera + Vision detection + landmark extraction
 │   ├── CameraPreview.swift          preview layer bridge
 │   ├── FaceEmbedder.swift           Core ML ArcFace: alignment + preprocess + inference
+│   ├── PADClassifier.swift          Core ML anti-spoof CNN (live/spoof)
 │   ├── FaceEngine.{hpp,cpp}         pure C++17 matching engine
 │   ├── FaceEngineBridge.{h,mm}      Objective-C++ bridge
 │   ├── FaceID-Bridging-Header.h
-│   └── ArcFaceR50.mlpackage         trained model (Git LFS)
+│   ├── ArcFaceR50.mlpackage         recognition model (Git LFS)
+│   └── FaceSpoofMBV3.mlpackage      anti-spoof model (Git LFS)
 ├── engine/                      # the C++ engine, OUTSIDE the app
 │   ├── tests/test_face_engine.cpp   unit tests (make -C engine test)
 │   ├── cli/face_cli.cpp             standalone CLI (cross-platform proof)
@@ -120,7 +140,9 @@ FaceID/
 │   ├── onnx_to_coreml.py
 │   ├── EXPORT_RUNBOOK.md
 │   └── eval/                        quantitative evaluation (ROC, FAR/FRR, robustness)
-└── training/                    # how the model was trained (H200, Glint360K)
+└── training/                    # how the models were trained (H200)
+    ├── *.py / configs / submit       Glint360K ArcFace recipe
+    └── antispoof/                    CelebA-Spoof anti-spoof recipe
 ```
 
 ## The model
@@ -171,13 +193,13 @@ Done:
 - [x] Per-identity management (rename / swipe-delete a single person)
 - [x] Enrollment quality gate (reject off-angle / tiny faces via Vision pose + size)
 - [x] Temporal label smoothing (majority vote across frames)
-- [x] Passive liveness / anti-spoofing (blink detection)
+- [x] Anti-spoofing: TrueDepth planarity + self-trained RGB CNN, display/gated modes
 - [x] C++ engine unit tests + standalone CLI (cross-platform proof)
 
 Next:
 - [ ] Port the C++ engine to Android (NDK) with a TFLite ArcFace front-end
-- [ ] Multi-face tracking with stable IDs (per-track smoothing instead of primary-only)
-- [ ] Stronger liveness (depth via TrueDepth, or a challenge–response)
+- [ ] Multi-face tracking with stable IDs (per-track smoothing + per-face CNN spoof check)
+- [ ] Challenge–response liveness (turn head / blink on cue) for high-security mode
 - [ ] Approximate nearest-neighbor index for large galleries
 
 ## Tech stack

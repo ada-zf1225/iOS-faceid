@@ -19,6 +19,19 @@ and works on devices without a depth camera.
 
 Metrics reported: accuracy, **APCER** (attack accepted as live) and **BPCER** (live rejected).
 
+**Result (4 epochs, CelebA-Spoof val, 47K images):** acc **99.93%**, APCER **0.10%**, BPCER **0.06%**.
+
+| epoch | acc | APCER | BPCER |
+|---|---|---|---|
+| 0 | 99.85% | 0.41% | 0.01% |
+| 1 | 99.88% | 0.16% | 0.10% |
+| 2 | 99.91% | 0.14% | 0.06% |
+| 3 | **99.93%** | **0.10%** | 0.06% |
+
+> In-distribution accuracy is very high; cross-device generalization of pure-RGB PAD is the known
+> hard part — which is exactly why the app fuses this with the TrueDepth planarity check rather
+> than trusting it alone.
+
 ## Reproduce
 
 ```bash
