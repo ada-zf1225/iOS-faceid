@@ -2,6 +2,12 @@ import AVFoundation
 import Vision
 import SwiftUI
 import UIKit
+import CoreImage
+
+/// 轻量触感反馈
+enum Haptics {
+    static func success() { DispatchQueue.main.async { UINotificationFeedbackGenerator().notificationOccurred(.success) } }
+}
 
 /// 一张被识别的人脸:框(屏幕坐标)+ 标签 + 是否认出
 struct RecognizedFace: Identifiable {
@@ -20,8 +26,19 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var enrolledCount: Int = 0
     @Published var enrolledNames: [String] = []
     @Published var pendingEnroll: [[Float]]? = nil   // 待命名的「一批」模板(多帧录入)
+    @Published var pendingThumb: UIImage? = nil      // 随 pendingEnroll 的人脸缩略图
     @Published var hint: String = ""
     @Published var threshold: Float = 0.35
+
+    private var lastBurstThumb: UIImage? = nil
+    private var enrollTargetName: String? = nil      // 非 nil = 补录到已有人,跳过命名
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private lazy var thumbsDir: URL = {
+        let d = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("thumbs")
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
 
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
@@ -74,32 +91,70 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// 点「录入」:连采 burstTarget 张合格脸作多模板
-    func requestEnroll() {
-        burstVecs = []
+    /// 点「录入」:连采 burstTarget 张合格脸作多模板。forName 非空 = 给已有人补录(跳过命名)。
+    func requestEnroll(forName name: String? = nil) {
+        enrollTargetName = name
+        burstVecs = []; lastBurstThumb = nil
         burstRemaining = burstTarget
-        DispatchQueue.main.async { self.hint = "录入中…保持正脸,轻微转动头部" }
+        let p = name == nil ? "录入中… " : "补录 \(name!)… "
+        DispatchQueue.main.async { self.hint = p + "0/\(self.burstTarget)" }
     }
 
     func enroll(name: String) {
-        defer { pendingEnroll = nil }
+        defer { pendingEnroll = nil; pendingThumb = nil }
         guard let vecs = pendingEnroll, !name.isEmpty else { return }
         for v in vecs { engine.enrollName(name, embedding: v.map { NSNumber(value: $0) }) }
-        refreshEnrolled()
+        if let t = pendingThumb { saveThumb(t, name: name) }
+        refreshEnrolled(); Haptics.success()
     }
 
-    func cancelEnroll() { pendingEnroll = nil }
+    func cancelEnroll() { pendingEnroll = nil; pendingThumb = nil }
 
-    func deletePerson(_ name: String) { engine.removeName(name); refreshEnrolled() }
+    func deletePerson(_ name: String) {
+        engine.removeName(name)
+        try? FileManager.default.removeItem(at: thumbURL(name))
+        refreshEnrolled()
+    }
     func renamePerson(_ old: String, to newName: String) {
         let t = newName.trimmingCharacters(in: .whitespaces)
         guard !t.isEmpty, t != old else { return }
-        engine.rename(from: old, to: t); refreshEnrolled()
+        engine.rename(from: old, to: t)
+        try? FileManager.default.moveItem(at: thumbURL(old), to: thumbURL(t))
+        refreshEnrolled()
     }
 
-    func resetDB() { engine.clear(); refreshEnrolled() }
+    func resetDB() {
+        engine.clear()
+        try? FileManager.default.removeItem(at: thumbsDir)
+        try? FileManager.default.createDirectory(at: thumbsDir, withIntermediateDirectories: true)
+        refreshEnrolled()
+    }
 
     func templateCount(_ name: String) -> Int { Int(engine.templateCount(of: name)) }
+
+    func thumbnail(for name: String) -> UIImage? { UIImage(contentsOfFile: thumbURL(name).path) }
+
+    private func thumbURL(_ name: String) -> URL {
+        let safe = name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "x"
+        return thumbsDir.appendingPathComponent(safe + ".jpg")
+    }
+    private func saveThumb(_ img: UIImage, name: String) {
+        if let d = img.jpegData(compressionQuality: 0.8) { try? d.write(to: thumbURL(name)) }
+    }
+    /// 从相机帧按人脸框裁一张 ~140px 缩略图(随预览镜像,自然)。
+    private func makeThumb(_ pb: CVPixelBuffer, box: CGRect) -> UIImage? {
+        let ci = CIImage(cvPixelBuffer: pb)
+        let W = ci.extent.width, H = ci.extent.height
+        let mx = box.width * 0.15 * W, my = box.height * 0.15 * H
+        let rect = CGRect(x: box.minX*W - mx, y: box.minY*H - my,
+                          width: box.width*W + 2*mx, height: box.height*H + 2*my).intersection(ci.extent)
+        guard !rect.isNull, rect.width > 8, rect.height > 8 else { return nil }
+        let cropped = ci.cropped(to: rect)
+        let s = 140.0 / max(cropped.extent.width, cropped.extent.height)
+        let scaled = cropped.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        guard let cg = ciContext.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
 
     private func refreshEnrolled() {
         let ns = engine.names()
@@ -278,13 +333,25 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             built.append((nb, label, recognized)); names.append(nm); vecs.append(qvec)
         }
 
-        // 多帧录入:每帧收主脸合格向量,够 burstTarget 张交界面命名
+        // 多帧录入:每帧收主脸合格向量 + 缩略图,显示进度;够 burstTarget 张后命名/补录
         if burstRemaining > 0, maxIdx >= 0, let v = vecs[maxIdx] {
             burstVecs.append(v)
+            lastBurstThumb = makeThumb(pixelBuffer, box: built[maxIdx].box) ?? lastBurstThumb
             burstRemaining -= 1
+            let got = burstTarget - burstRemaining
+            let tn = enrollTargetName
+            DispatchQueue.main.async { self.hint = (tn == nil ? "录入中… " : "补录中… ") + "\(got)/\(self.burstTarget)" }
             if burstRemaining == 0 {
-                let batch = burstVecs
-                DispatchQueue.main.async { self.pendingEnroll = batch; self.hint = "" }
+                let batch = burstVecs, thumb = lastBurstThumb
+                if let tn = enrollTargetName {                 // 补录:直接入库,不弹命名
+                    enrollTargetName = nil
+                    for vv in batch { engine.enrollName(tn, embedding: vv.map { NSNumber(value: $0) }) }
+                    if let thumb { saveThumb(thumb, name: tn) }
+                    refreshEnrolled(); Haptics.success()
+                    DispatchQueue.main.async { self.hint = "已补录 \(batch.count) 张到 \(tn)" }
+                } else {                                        // 新人:交界面命名
+                    DispatchQueue.main.async { self.pendingEnroll = batch; self.pendingThumb = thumb; self.hint = "" }
+                }
             }
         }
 

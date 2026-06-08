@@ -108,6 +108,16 @@ struct ManagePeopleView: View {
     @State private var renaming: String? = nil
     @State private var renameText = ""
 
+    @ViewBuilder private func thumb(_ name: String) -> some View {
+        if let img = model.thumbnail(for: name) {
+            Image(uiImage: img).resizable().scaledToFill()
+                .frame(width: 44, height: 44).clipShape(Circle())
+        } else {
+            Image(systemName: "person.crop.circle").font(.largeTitle)
+                .foregroundStyle(.tint).frame(width: 44, height: 44)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -115,18 +125,20 @@ struct ManagePeopleView: View {
                     Text("库为空,先去录入").foregroundStyle(.secondary)
                 }
                 ForEach(model.enrolledNames, id: \.self) { name in
-                    HStack {
-                        Image(systemName: "person.crop.circle").foregroundStyle(.tint)
+                    HStack(spacing: 12) {
+                        thumb(name)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(name).font(.body)
                             Text("\(model.templateCount(name)) 个模板")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button {
-                            renameText = name; renaming = name
-                        } label: { Image(systemName: "pencil") }
-                        .buttonStyle(.borderless)
+                        Button { model.requestEnroll(forName: name); dismiss() } label: {
+                            Image(systemName: "plus.viewfinder")
+                        }.buttonStyle(.borderless)
+                        Button { renameText = name; renaming = name } label: {
+                            Image(systemName: "pencil")
+                        }.buttonStyle(.borderless)
                     }
                     .swipeActions {
                         Button(role: .destructive) { model.deletePerson(name) } label: {
