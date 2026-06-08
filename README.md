@@ -4,7 +4,7 @@
 
 **Real-time face enrollment & recognition that runs entirely on the device — powered by a custom ArcFace model trained from scratch on 16× NVIDIA H200.**
 
-[![CI](https://github.com/ada-zf1225/iOS-faceid/actions/workflows/ci.yml/badge.svg)](https://github.com/ada-zf1225/iOS-faceid/actions/workflows/ci.yml)
+[![CI](https://github.com/ada-zf1225/iOS-faceid/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ada-zf1225/iOS-faceid/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-iOS%2018.5%2B-blue.svg)](https://developer.apple.com/ios/)
 [![Swift](https://img.shields.io/badge/Swift-6-orange.svg)](https://swift.org)
 [![Core ML](https://img.shields.io/badge/Core%20ML-ArcFace%20R50-green.svg)](https://developer.apple.com/machine-learning/core-ml/)
