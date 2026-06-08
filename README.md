@@ -131,10 +131,30 @@ Full recipe, augmentation rationale, and one-command reproduction in [`training/
 
 ## Evaluation
 
-<!-- TODO(Track B): 回填 ROC/EER/FAR-FRR 与 mbf↔r50 对比图 -->
-Quantitative results — genuine vs. impostor score distributions, ROC, EER, and a
-MobileFaceNet → ResNet-50 comparison on a glasses/scale stress set — live in
-[`tools/eval/`](tools/eval/). _(Numbers and plots are added in the evaluation pass.)_
+Measured on **LFW** verification (1000 pairs), with faces detected and 5-point aligned using the
+**same template the app uses**, embeddings from the exported ONNX (≡ shipped fp16 Core ML, cosine
+0.9984). Full report + plots: [`tools/eval/RESULTS.md`](tools/eval/results/RESULTS.md) — reproduce
+with `python tools/eval/evaluate.py`.
+
+| Model | AUC | EER | Acc | genuine cos | impostor cos |
+|---|---|---|---|---|---|
+| MobileFaceNet (baseline) | 0.9963 | 1.40% | 99.10% | 0.613 ± 0.130 | 0.004 ± 0.069 |
+| **ResNet-50 (ours)** | **0.9976** | **1.20%** | **99.30%** | **0.681 ± 0.123** | **−0.002 ± 0.054** |
+
+The self-trained model wins across the board and, crucially, **holds up better under the two
+failure modes it was trained for**. Under simulated eye-region occlusion (glasses/mask proxy) its
+advantage over the baseline *grows* with severity:
+
+| genuine cosine @ occlusion | 0% | 10% | 20% | 30% | 40% |
+|---|---|---|---|---|---|
+| MobileFaceNet | 0.613 | 0.524 | 0.450 | 0.384 | 0.294 |
+| **ResNet-50 (ours)** | **0.681** | **0.611** | **0.536** | **0.482** | **0.391** |
+
+<p align="center"><img src="tools/eval/results/roc.png" width="46%"/> <img src="tools/eval/results/robustness_occlusion.png" width="46%"/></p>
+
+> LFW's EER threshold sits near 0.19; the app defaults to a more conservative **0.35** (in-the-wild
+> glasses/pose lower genuine scores) with a live slider to retune. Stranger scores cluster at ≈0,
+> leaving comfortable margin.
 
 ## Roadmap
 
