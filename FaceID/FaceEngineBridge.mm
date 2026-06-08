@@ -42,6 +42,26 @@ static std::vector<float> ToVec(NSArray<NSNumber *> *arr) {
 }
 
 - (NSInteger)count { return _engine->count(); }
+
+- (NSArray<NSString *> *)names {
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    for (const auto &n : _engine->names())
+        [out addObject:[NSString stringWithUTF8String:n.c_str()]];
+    return out;
+}
+
+- (NSInteger)templateCountForName:(NSString *)name {
+    return _engine->templateCount(std::string(name.UTF8String));
+}
+
+- (BOOL)removeName:(NSString *)name {
+    return _engine->remove(std::string(name.UTF8String)) ? YES : NO;
+}
+
+- (BOOL)renameFrom:(NSString *)oldName to:(NSString *)newName {
+    return _engine->rename(std::string(oldName.UTF8String), std::string(newName.UTF8String)) ? YES : NO;
+}
+
 - (void)clear { _engine->clear(); }
 
 @end

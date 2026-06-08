@@ -12,9 +12,13 @@ NS_ASSUME_NONNULL_BEGIN
 /// 真正的 C++ 藏在 .mm 实现里(Swift 不直接接触 C++,最稳)。
 @interface FaceEngineBridge : NSObject
 - (instancetype)initWithDBPath:(NSString *)path;
-- (void)enrollName:(NSString *)name embedding:(NSArray<NSNumber *> *)embedding;
+- (void)enrollName:(NSString *)name embedding:(NSArray<NSNumber *> *)embedding;  // 同名多次=多模板
 - (nullable FaceMatch *)findBest:(NSArray<NSNumber *> *)embedding;  // 库空返回 nil
-- (NSInteger)count;
+- (NSInteger)count;                                  // 不同「人」数
+- (NSArray<NSString *> *)names;                      // 去重姓名,按首次录入顺序
+- (NSInteger)templateCountForName:(NSString *)name NS_SWIFT_NAME(templateCount(of:));  // 某人模板数
+- (BOOL)removeName:(NSString *)name;                 // 删除某人
+- (BOOL)renameFrom:(NSString *)oldName to:(NSString *)newName;
 - (void)clear;
 @end
 

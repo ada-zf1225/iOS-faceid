@@ -35,6 +35,11 @@ Carthage/Build/
 fastlane/report.xml
 fastlane/screenshots/**/*.png
 
+# ── C++ engine 构建产物 ──
+engine/face_cli
+*.o
+*.dSYM/
+
 # ── Python (tools/ 与 training/ 用)──
 __pycache__/
 *.py[cod]

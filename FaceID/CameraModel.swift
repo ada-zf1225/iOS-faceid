@@ -18,7 +18,10 @@ final class CameraModel: NSObject, ObservableObject {
 
     @Published var faces: [RecognizedFace] = []
     @Published var enrolledCount: Int = 0
-    @Published var pendingEnroll: [Float]? = nil   // 待命名的人脸向量(点了录入后)
+    @Published var enrolledNames: [String] = []      // 库中姓名(管理面板用)
+    @Published var pendingEnroll: [[Float]]? = nil   // 待命名的「一批」模板(多帧录入)
+    @Published var livenessOK: Bool = false          // 最近检测到眨眼 = 真人(防照片)
+    @Published var hint: String = ""                 // 顶部即时提示(质量门 / 活体)
 
     /// 余弦相似度 ≥ 此值判为同一人。ArcFace 余弦整体偏低、陌生人≈0.1,
     /// 默认 0.35(给眼镜/姿态留余量),真机用滑块实时标定。
@@ -36,9 +39,24 @@ final class CameraModel: NSObject, ObservableObject {
 
     private let embedder = FaceEmbedder()
     private let engine: FaceEngineBridge
-    private var captureNext = false
     private var lastProcess = Date.distantPast
     private let interval: TimeInterval = 0.14   // ~7fps 识别(预览是另一条流,不受影响)
+
+    // 多帧录入(multi-shot):一次点击采集 burstTarget 张「合格」人脸,作为多模板录入
+    private var burstRemaining = 0
+    private var burstVecs: [[Float]] = []
+    private let burstTarget = 5
+
+    // 质量门:太远/太偏的脸不录入(归一化框宽下限、姿态弧度上限 ~28°)
+    private let minFaceWidth: CGFloat = 0.14
+    private let maxPoseRad: Float = 0.5
+
+    // 活体(眨眼):跟最大脸的眼开度,先闭后睁判为一次眨眼
+    private var sawClosed = false
+    private var noFaceFrames = 0
+
+    // 时序防闪烁:主脸标签滑窗投票
+    private var labelHistory: [String] = []
 
     override init() {
         let dir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first
@@ -46,7 +64,8 @@ final class CameraModel: NSObject, ObservableObject {
         let dbPath = (dir as NSString).appendingPathComponent("faces.db")
         engine = FaceEngineBridge(dbPath: dbPath)
         super.init()
-        enrolledCount = engine.count()
+        enrolledNames = engine.names()
+        enrolledCount = enrolledNames.count
     }
 
     func setPreviewLayer(_ layer: AVCaptureVideoPreviewLayer) {
@@ -61,23 +80,44 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// 点「录入」:下一帧把最大的人脸向量交给界面去命名
-    func requestEnroll() { captureNext = true }
+    /// 点「录入」:先要求活体(防照片),再连采 burstTarget 张合格脸作多模板
+    func requestEnroll() {
+        guard livenessOK else {
+            DispatchQueue.main.async { self.hint = "请正对镜头并眨一下眼 👁 确认是真人" }
+            return
+        }
+        burstVecs = []
+        burstRemaining = burstTarget
+        DispatchQueue.main.async { self.hint = "录入中…保持正脸,轻微转动头部" }
+    }
 
-    /// 命名确认后真正录入
+    /// 命名确认后真正录入(一批模板都挂到同一姓名下)
     func enroll(name: String) {
-        guard let vec = pendingEnroll, !name.isEmpty else { pendingEnroll = nil; return }
-        engine.enrollName(name, embedding: vec.map { NSNumber(value: $0) })
-        enrolledCount = engine.count()
-        pendingEnroll = nil
+        defer { pendingEnroll = nil }
+        guard let vecs = pendingEnroll, !name.isEmpty else { return }
+        for v in vecs { engine.enrollName(name, embedding: v.map { NSNumber(value: $0) }) }
+        refreshEnrolled()
     }
 
     func cancelEnroll() { pendingEnroll = nil }
 
+    /// 删除 / 改名某人(管理面板用)
+    func deletePerson(_ name: String) { engine.removeName(name); refreshEnrolled() }
+    func renamePerson(_ old: String, to newName: String) {
+        let t = newName.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, t != old else { return }
+        engine.rename(from: old, to: t); refreshEnrolled()
+    }
+
     /// 清空整个录入库
-    func resetDB() {
-        engine.clear()
-        enrolledCount = 0
+    func resetDB() { engine.clear(); refreshEnrolled() }
+
+    /// 某人有几条模板(管理面板显示用)
+    func templateCount(_ name: String) -> Int { Int(engine.templateCount(of: name)) }
+
+    private func refreshEnrolled() {
+        let ns = engine.names()
+        DispatchQueue.main.async { self.enrolledNames = ns; self.enrolledCount = ns.count }
     }
 
     // MARK: - 相机配置
@@ -156,12 +196,58 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         return [eyeL, eyeR, nose, mL, mR]
     }
 
+    /// 录入质量门:脸够大(不太远)+ 姿态够正(yaw/roll 在阈内)。识别不受此限制。
+    private func qualityOK(_ obs: VNFaceObservation) -> Bool {
+        if obs.boundingBox.width < minFaceWidth { return false }
+        if let y = obs.yaw?.floatValue, abs(y) > maxPoseRad { return false }
+        if let r = obs.roll?.floatValue, abs(r) > maxPoseRad { return false }
+        return true
+    }
+
+    /// 眼开度(眼轮廓 高/宽 比);睁眼≈0.25+,闭眼≈<0.15。取双眼均值。
+    private func eyeOpenness(_ obs: VNFaceObservation) -> Float? {
+        guard let lm = obs.landmarks else { return nil }
+        func ratio(_ r: VNFaceLandmarkRegion2D?) -> Float? {
+            guard let p = r?.normalizedPoints, p.count >= 4 else { return nil }
+            let xs = p.map { $0.x }, ys = p.map { $0.y }
+            let w = (xs.max()! - xs.min()!), h = (ys.max()! - ys.min()!)
+            return w > 1e-5 ? Float(h / w) : nil
+        }
+        let vals = [ratio(lm.leftEye), ratio(lm.rightEye)].compactMap { $0 }
+        return vals.isEmpty ? nil : vals.reduce(0, +) / Float(vals.count)
+    }
+
+    /// 用最大脸的眼开度更新活体状态(先闭后睁=一次眨眼);久无脸则失效。
+    private func updateLiveness(primary: VNFaceObservation?) {
+        if let p = primary, let o = eyeOpenness(p) {
+            noFaceFrames = 0
+            if o < 0.16 { sawClosed = true }
+            if sawClosed && o > 0.24 { sawClosed = false; setLive(true) }
+        } else {
+            noFaceFrames += 1
+            if noFaceFrames > 20 { sawClosed = false; setLive(false) }
+        }
+    }
+    private func setLive(_ v: Bool) {
+        DispatchQueue.main.async { if self.livenessOK != v { self.livenessOK = v } }
+    }
+
+    /// 主脸标签滑窗投票:返回出现最多的姓名(仅统计已认出的帧),减少抖动。
+    private func smoothedName(_ current: String?) -> String? {
+        labelHistory.append(current ?? "")
+        if labelHistory.count > 7 { labelHistory.removeFirst() }
+        var tally: [String: Int] = [:]
+        for s in labelHistory where !s.isEmpty { tally[s, default: 0] += 1 }
+        guard let (name, n) = tally.max(by: { $0.value < $1.value }), n >= 3 else { return nil }
+        return name
+    }
+
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        // 节流(检测+编码较重);点了录入时这一帧强制处理
+        // 节流(检测+编码较重)
         let now = Date()
-        if now.timeIntervalSince(lastProcess) < interval && !captureNext { return }
+        if now.timeIntervalSince(lastProcess) < interval { return }
         lastProcess = now
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -173,17 +259,23 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         try? handler.perform([request])
         let observations = request.results ?? []
 
-        // 逐张:(优先)5点对齐裁剪 /(兜底)框裁剪 → 编码 → 比对
+        // 逐张:5点对齐裁剪 → 编码 → 比对;记录每张脸的姓名/合格录入向量,并挑「最大脸」
         var built: [(box: CGRect, label: String, recognized: Bool)] = []
-        var largest: (vec: [Float], area: CGFloat)? = nil
+        var names: [String?] = []        // 每脸认出的姓名(nil=未认出)
+        var vecs: [[Float]?] = []        // 每脸的「合格」录入向量(nil=不合格/无关键点)
+        var maxIdx = -1; var maxArea: CGFloat = -1
 
-        for obs in observations {
+        for (i, obs) in observations.enumerated() {
             let nb = obs.boundingBox
+            let area = nb.width * nb.height
+            if area > maxArea { maxArea = area; maxIdx = i }
+
             var label = "模型未加载"
             var recognized = false
+            var nm: String? = nil
+            var qvec: [Float]? = nil
 
             // 只走「5点对齐」这一条路,保证录入/查询向量永远同一空间(跨尺寸一致)。
-            // 拿不到关键点(脸太小/太偏)就提示靠近,不做比对、也不可录入。
             if let embedder, let pts = landmarkPoints(obs, bufW: bufW, bufH: bufH),
                let vec = embedder.embedAligned(pixelBuffer: pixelBuffer, src5: pts) {
                 let match = engine.findBest(vec.map { NSNumber(value: $0) })
@@ -191,25 +283,36 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
                 if let m = match {
                     label = recognized ? String(format: "%@ %.2f", m.name, m.score)
                                        : String(format: "陌生人 %.2f", m.score)
+                    if recognized { nm = m.name }
                 } else {
                     label = "库为空"
                 }
-                let area = nb.width * nb.height
-                if captureNext, largest == nil || area > largest!.area {
-                    largest = (vec, area)
-                }
+                if qualityOK(obs) { qvec = vec }   // 录入只收合格(够大够正)的脸
             } else {
                 label = "靠近 · 正对镜头"
             }
-            built.append((nb, label, recognized))
+            built.append((nb, label, recognized)); names.append(nm); vecs.append(qvec)
         }
 
-        // 处理录入抓取
-        if captureNext {
-            captureNext = false
-            if let lg = largest {
-                DispatchQueue.main.async { self.pendingEnroll = lg.vec }
+        // 活体:用最大脸的眨眼更新
+        updateLiveness(primary: maxIdx >= 0 ? observations[maxIdx] : nil)
+
+        // 多帧录入:每帧收主脸的合格向量,够 burstTarget 张就交界面命名
+        if burstRemaining > 0, maxIdx >= 0, let v = vecs[maxIdx] {
+            burstVecs.append(v)
+            burstRemaining -= 1
+            if burstRemaining == 0 {
+                let batch = burstVecs
+                DispatchQueue.main.async { self.pendingEnroll = batch; self.hint = "" }
             }
+        }
+
+        // 时序防闪烁:主脸姓名滑窗投票,稳定后覆盖显示
+        if maxIdx >= 0, let sm = smoothedName(names[maxIdx]) {
+            built[maxIdx].label = sm + " ✓"
+            built[maxIdx].recognized = true
+        } else if maxIdx < 0 {
+            _ = smoothedName(nil)
         }
 
         // 归一化框 → 屏幕坐标(复刻预览 .resizeAspectFill),发布

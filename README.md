@@ -34,7 +34,11 @@ What makes this more than a wrapper around a pretrained model:
 | 🎯 Real-time recognition | Front-camera live preview, ~7 fps recognition pipeline, green/red boxes + name + score |
 | 🧬 5-point alignment | Vision landmarks → closed-form similarity transform → 112×112 ArcFace template |
 | 🧠 Self-trained ArcFace R50 | 512-d embeddings, fp16 Core ML, runs on the Neural Engine |
-| 💾 On-device enrollment | Tap to enroll a face under a name; persisted locally, survives relaunch |
+| 💾 On-device enrollment | Tap to enroll; persisted locally, survives relaunch |
+| 📸 Multi-shot enrollment | One tap captures several quality-gated frames → multiple templates per person → better recall across pose/glasses |
+| 👤 Identity management | List enrolled people, rename, swipe-to-delete (no more clear-all only) |
+| 👁 Passive liveness | Blink detection (eye-aspect-ratio over frames) gates enrollment — blocks holding up a static photo |
+| ✅ Quality gate + smoothing | Rejects too-far / off-angle faces at enroll; temporal vote stabilizes the on-screen label |
 | 🎚️ Tunable threshold | Live cosine-similarity threshold slider for FAR/FRR trade-off |
 | 🔒 Fully offline | No network calls; embeddings + database never leave the device |
 
@@ -108,11 +112,15 @@ FaceID/
 │   ├── FaceEngineBridge.{h,mm}      Objective-C++ bridge
 │   ├── FaceID-Bridging-Header.h
 │   └── ArcFaceR50.mlpackage         trained model (Git LFS)
+├── engine/                      # the C++ engine, OUTSIDE the app
+│   ├── tests/test_face_engine.cpp   unit tests (make -C engine test)
+│   ├── cli/face_cli.cpp             standalone CLI (cross-platform proof)
+│   └── Makefile
 ├── tools/                       # ONNX → Core ML export
 │   ├── onnx_to_coreml.py
-│   └── EXPORT_RUNBOOK.md
-├── training/                    # how the model was trained (H200, Glint360K)   ← see Track C
-└── tools/eval/                  # quantitative evaluation (ROC, FAR/FRR)         ← see Track B
+│   ├── EXPORT_RUNBOOK.md
+│   └── eval/                        quantitative evaluation (ROC, FAR/FRR, robustness)
+└── training/                    # how the model was trained (H200, Glint360K)
 ```
 
 ## The model
@@ -158,12 +166,19 @@ advantage over the baseline *grows* with severity:
 
 ## Roadmap
 
-- [ ] Multi-shot enrollment (average several frames per identity)
-- [ ] Per-identity management (rename / delete a single person)
-- [ ] Enrollment quality gate (reject blurry / extreme-pose / tiny faces)
-- [ ] Temporal label smoothing (vote across frames)
-- [ ] Passive liveness / anti-spoofing (blink detection)
-- [ ] C++ engine unit tests + standalone CLI (cross-platform proof)
+Done:
+- [x] Multi-shot enrollment (several quality-gated templates per identity)
+- [x] Per-identity management (rename / swipe-delete a single person)
+- [x] Enrollment quality gate (reject off-angle / tiny faces via Vision pose + size)
+- [x] Temporal label smoothing (majority vote across frames)
+- [x] Passive liveness / anti-spoofing (blink detection)
+- [x] C++ engine unit tests + standalone CLI (cross-platform proof)
+
+Next:
+- [ ] Port the C++ engine to Android (NDK) with a TFLite ArcFace front-end
+- [ ] Multi-face tracking with stable IDs (per-track smoothing instead of primary-only)
+- [ ] Stronger liveness (depth via TrueDepth, or a challenge–response)
+- [ ] Approximate nearest-neighbor index for large galleries
 
 ## Tech stack
 

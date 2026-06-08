@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var model = CameraModel()
     @State private var enrollName = ""
+    @State private var showManage = false
 
     var body: some View {
         ZStack {
@@ -30,21 +31,40 @@ struct ContentView: View {
             }
             .ignoresSafeArea()
 
-            // 3) 顶部计数 + 底部录入按钮
+            // 3) 顶部状态条 + 底部录入
             VStack {
-                HStack(spacing: 12) {
-                    Text("库中 \(model.enrolledCount) 人 · 当前 \(model.faces.count) 张脸")
-                        .font(.headline)
-                        .foregroundColor(.white)
+                HStack(spacing: 10) {
+                    Text("库中 \(model.enrolledCount) 人 · \(model.faces.count) 张脸")
+                        .font(.subheadline).bold().foregroundColor(.white)
+                    Spacer()
+                    // 活体徽章(检测到眨眼=绿)
+                    Label(model.livenessOK ? "活体" : "活体?",
+                          systemImage: model.livenessOK ? "eye.fill" : "eye.slash")
+                        .font(.caption2).bold().foregroundColor(.white)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(model.livenessOK ? Color.green : Color.gray)
+                        .clipShape(Capsule())
+                    Button { showManage = true } label: {
+                        Image(systemName: "person.2.crop.square.stack")
+                    }.tint(.white)
                     Button(role: .destructive) { model.resetDB() } label: {
                         Image(systemName: "trash")
-                    }
-                    .tint(.red)
+                    }.tint(.red)
                 }
-                .padding(8)
+                .padding(10)
                 .background(.black.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .padding(.top, 60)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .padding(.top, 60).padding(.horizontal, 12)
+
+                // 即时提示(质量门 / 活体)
+                if !model.hint.isEmpty {
+                    Text(model.hint)
+                        .font(.caption).bold().foregroundColor(.white)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.black.opacity(0.55))
+                        .clipShape(Capsule())
+                        .padding(.top, 6)
+                }
 
                 Spacer()
 
@@ -64,7 +84,7 @@ struct ContentView: View {
                 Button {
                     model.requestEnroll()
                 } label: {
-                    Label("录入当前人脸", systemImage: "person.crop.circle.badge.plus")
+                    Label("录入当前人脸(多帧)", systemImage: "person.crop.circle.badge.plus")
                         .font(.headline)
                         .padding(.horizontal, 20).padding(.vertical, 12)
                 }
@@ -81,7 +101,63 @@ struct ContentView: View {
             Button("保存") { model.enroll(name: enrollName); enrollName = "" }
             Button("取消", role: .cancel) { model.cancelEnroll(); enrollName = "" }
         } message: {
-            Text("给当前这张脸起个名字")
+            Text("已采集 \(model.pendingEnroll?.count ?? 0) 帧,作为多模板挂到同一姓名下")
+        }
+        .sheet(isPresented: $showManage) {
+            ManagePeopleView(model: model)
+        }
+    }
+}
+
+/// 已录入人物管理:列出姓名 + 模板数,支持改名 / 滑动删除。
+struct ManagePeopleView: View {
+    @ObservedObject var model: CameraModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var renaming: String? = nil
+    @State private var renameText = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if model.enrolledNames.isEmpty {
+                    Text("库为空,先去录入").foregroundStyle(.secondary)
+                }
+                ForEach(model.enrolledNames, id: \.self) { name in
+                    HStack {
+                        Image(systemName: "person.crop.circle").foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(name).font(.body)
+                            Text("\(model.templateCount(name)) 个模板")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button {
+                            renameText = name; renaming = name
+                        } label: { Image(systemName: "pencil") }
+                        .buttonStyle(.borderless)
+                    }
+                    .swipeActions {
+                        Button(role: .destructive) { model.deletePerson(name) } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("已录入的人")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+            }
+            .alert("改名", isPresented: Binding(
+                get: { renaming != nil }, set: { if !$0 { renaming = nil } }
+            )) {
+                TextField("新名字", text: $renameText)
+                Button("保存") {
+                    if let old = renaming { model.renamePerson(old, to: renameText) }
+                    renaming = nil
+                }
+                Button("取消", role: .cancel) { renaming = nil }
+            }
         }
     }
 }

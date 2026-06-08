@@ -39,7 +39,7 @@ FaceEngine::Match FaceEngine::findBest(const std::vector<float>& embedding) cons
     const Entry* best = nullptr;
     float bestScore = -2.f;
     for (const auto& e : entries_) {
-        float s = cosine(q, e.emb);
+        float s = cosine(q, e.emb);     // 多模板:取所有模板里的最高分
         if (s > bestScore) { bestScore = s; best = &e; }
     }
     return {best->name, bestScore};
@@ -47,7 +47,47 @@ FaceEngine::Match FaceEngine::findBest(const std::vector<float>& embedding) cons
 
 int FaceEngine::count() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return static_cast<int>(entries_.size());
+    std::vector<std::string> seen;
+    for (const auto& e : entries_)
+        if (std::find(seen.begin(), seen.end(), e.name) == seen.end())
+            seen.push_back(e.name);
+    return static_cast<int>(seen.size());
+}
+
+int FaceEngine::templateCount(const std::string& name) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    int n = 0;
+    for (const auto& e : entries_) if (e.name == name) ++n;
+    return n;
+}
+
+std::vector<std::string> FaceEngine::names() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::string> seen;
+    for (const auto& e : entries_)
+        if (std::find(seen.begin(), seen.end(), e.name) == seen.end())
+            seen.push_back(e.name);
+    return seen;
+}
+
+bool FaceEngine::remove(const std::string& name) {
+    std::lock_guard<std::mutex> lk(mu_);
+    size_t before = entries_.size();
+    entries_.erase(std::remove_if(entries_.begin(), entries_.end(),
+                                  [&](const Entry& e){ return e.name == name; }),
+                   entries_.end());
+    bool changed = entries_.size() != before;
+    if (changed) save();
+    return changed;
+}
+
+bool FaceEngine::rename(const std::string& oldName, const std::string& newName) {
+    std::lock_guard<std::mutex> lk(mu_);
+    bool changed = false;
+    for (auto& e : entries_)
+        if (e.name == oldName) { e.name = newName; changed = true; }
+    if (changed) save();
+    return changed;
 }
 
 void FaceEngine::clear() {
