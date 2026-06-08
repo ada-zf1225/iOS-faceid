@@ -15,8 +15,7 @@ struct ContentView: View {
 
             // 2) 人脸框 + 姓名标签(认出=绿,陌生人=红)
             ForEach(model.faces) { face in
-                // 平面假体=橙,认出=绿,陌生人=红
-                let color: Color = face.live == false ? .orange : (face.recognized ? .green : .red)
+                let color: Color = face.recognized ? .green : .red
                 Rectangle()
                     .stroke(color, lineWidth: 3)
                     .frame(width: face.box.width, height: face.box.height)
@@ -38,13 +37,6 @@ struct ContentView: View {
                     Text("库中 \(model.enrolledCount) 人 · \(model.faces.count) 张脸")
                         .font(.subheadline).bold().foregroundColor(.white)
                     Spacer()
-                    // 活体徽章(检测到眨眼=绿)
-                    Label(model.livenessOK ? "活体" : "活体?",
-                          systemImage: model.livenessOK ? "eye.fill" : "eye.slash")
-                        .font(.caption2).bold().foregroundColor(.white)
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(model.livenessOK ? Color.green : Color.gray)
-                        .clipShape(Capsule())
                     Button { showManage = true } label: {
                         Image(systemName: "person.2.crop.square.stack")
                     }.tint(.white)
@@ -57,7 +49,6 @@ struct ContentView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .padding(.top, 60).padding(.horizontal, 12)
 
-                // 即时提示(质量门 / 活体)
                 if !model.hint.isEmpty {
                     Text(model.hint)
                         .font(.caption).bold().foregroundColor(.white)
@@ -65,30 +56,6 @@ struct ContentView: View {
                         .background(.black.opacity(0.55))
                         .clipShape(Capsule())
                         .padding(.top, 6)
-                }
-
-                // 活体门控开关 + 深度标定读数
-                HStack(spacing: 10) {
-                    if model.depthAvailable {
-                        Toggle(isOn: $model.gateMode) {
-                            Text(model.gateMode ? "门控:假体不认" : "仅显示活体/假体")
-                                .font(.caption2).bold().foregroundColor(.white)
-                        }
-                        .toggleStyle(.switch).tint(.green).fixedSize()
-                    } else {
-                        Text("无深度摄像头 · 仅眨眼活体")
-                            .font(.caption2).foregroundColor(.yellow)
-                    }
-                }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(.black.opacity(0.5)).clipShape(Capsule())
-                .padding(.top, 6)
-
-                if !model.depthDebug.isEmpty {
-                    Text(model.depthDebug)       // 真机标定:看 res 值定阈值
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.8))
-                        .padding(.top, 2)
                 }
 
                 Spacer()

@@ -60,3 +60,11 @@ tools/eval/_work/
 tools/eval/*.npy
 
 # 说明:.mlpackage 走 Git LFS(见 .gitattributes),不在此忽略。
+
+# ── 本地编辑器 / LSP / 工具(含机器专属绝对路径,不进 git)──
+.vscode/
+.claude/
+.compile
+buildServer.json
+**/compile_commands.json
+# 每台机器各自用 `xcode-build-server config ...` 重新生成 LSP 配置。
