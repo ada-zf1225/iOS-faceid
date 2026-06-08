@@ -15,7 +15,8 @@ struct ContentView: View {
 
             // 2) 人脸框 + 姓名标签(认出=绿,陌生人=红)
             ForEach(model.faces) { face in
-                let color: Color = face.recognized ? .green : .red
+                // 平面假体=橙,认出=绿,陌生人=红
+                let color: Color = face.live == false ? .orange : (face.recognized ? .green : .red)
                 Rectangle()
                     .stroke(color, lineWidth: 3)
                     .frame(width: face.box.width, height: face.box.height)
@@ -64,6 +65,30 @@ struct ContentView: View {
                         .background(.black.opacity(0.55))
                         .clipShape(Capsule())
                         .padding(.top, 6)
+                }
+
+                // 活体门控开关 + 深度标定读数
+                HStack(spacing: 10) {
+                    if model.depthAvailable {
+                        Toggle(isOn: $model.gateMode) {
+                            Text(model.gateMode ? "门控:假体不认" : "仅显示活体/假体")
+                                .font(.caption2).bold().foregroundColor(.white)
+                        }
+                        .toggleStyle(.switch).tint(.green).fixedSize()
+                    } else {
+                        Text("无深度摄像头 · 仅眨眼活体")
+                            .font(.caption2).foregroundColor(.yellow)
+                    }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(.black.opacity(0.5)).clipShape(Capsule())
+                .padding(.top, 6)
+
+                if !model.depthDebug.isEmpty {
+                    Text(model.depthDebug)       // 真机标定:看 res 值定阈值
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.8))
+                        .padding(.top, 2)
                 }
 
                 Spacer()

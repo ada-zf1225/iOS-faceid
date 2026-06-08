@@ -3,32 +3,35 @@ import Vision
 import SwiftUI
 import UIKit
 
-/// 一张被识别的人脸:框(屏幕坐标)+ 标签 + 是否认出
+/// 一张被识别的人脸:框(屏幕坐标)+ 标签 + 是否认出 + 活体判定
 struct RecognizedFace: Identifiable {
     let id = UUID()
     let box: CGRect
     let label: String
     let recognized: Bool
+    let live: Bool?        // nil=未知(无深度/样本不足);true=真人;false=平面假体
 }
 
-/// 相机 + 检测 + 识别核心。
-/// 流程:相机帧(已随朝向转正+镜像)→ Vision 检测人脸 → 逐张裁剪 → FaceNet 编码
-///       → C++ 引擎余弦比对 → 标签(✅姓名 / ❓陌生人)。识别管线节流到 ~7fps。
+/// 相机 + 检测 + 识别 + 活体核心。
+/// 流程:TrueDepth 相机帧(视频+深度同步)→ Vision 检测/关键点 → 5点对齐 → ArcFace 编码
+///       → C++ 引擎余弦比对 → 标签;同时按人脸区域采样深度图,平面拟合判真脸/平面(防照片+视频回放)。
 final class CameraModel: NSObject, ObservableObject {
 
     @Published var faces: [RecognizedFace] = []
     @Published var enrolledCount: Int = 0
-    @Published var enrolledNames: [String] = []      // 库中姓名(管理面板用)
-    @Published var pendingEnroll: [[Float]]? = nil   // 待命名的「一批」模板(多帧录入)
-    @Published var livenessOK: Bool = false          // 最近检测到眨眼 = 真人(防照片)
-    @Published var hint: String = ""                 // 顶部即时提示(质量门 / 活体)
-
-    /// 余弦相似度 ≥ 此值判为同一人。ArcFace 余弦整体偏低、陌生人≈0.1,
-    /// 默认 0.35(给眼镜/姿态留余量),真机用滑块实时标定。
+    @Published var enrolledNames: [String] = []
+    @Published var pendingEnroll: [[Float]]? = nil
+    @Published var livenessOK: Bool = false          // 眨眼活体(录入门控用)
+    @Published var hint: String = ""
     @Published var threshold: Float = 0.35
+    @Published var gateMode: Bool = false            // false=只显示活体/假体;true=门控(假体不给身份)
+    @Published var depthAvailable: Bool = false      // 设备是否有 TrueDepth
+    @Published var depthDebug: String = ""           // 主脸深度指标(真机标定用)
 
     let session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
+    private let depthOutput = AVCaptureDepthDataOutput()
+    private var synchronizer: AVCaptureDataOutputSynchronizer?
     private let sessionQueue = DispatchQueue(label: "faceid.camera.session")
     private let frameQueue = DispatchQueue(label: "faceid.camera.frames")
 
@@ -40,23 +43,30 @@ final class CameraModel: NSObject, ObservableObject {
     private let embedder = FaceEmbedder()
     private let engine: FaceEngineBridge
     private var lastProcess = Date.distantPast
-    private let interval: TimeInterval = 0.14   // ~7fps 识别(预览是另一条流,不受影响)
+    private let interval: TimeInterval = 0.14
 
-    // 多帧录入(multi-shot):一次点击采集 burstTarget 张「合格」人脸,作为多模板录入
+    // 多帧录入
     private var burstRemaining = 0
     private var burstVecs: [[Float]] = []
     private let burstTarget = 5
 
-    // 质量门:太远/太偏的脸不录入(归一化框宽下限、姿态弧度上限 ~28°)
+    // 录入质量门
     private let minFaceWidth: CGFloat = 0.14
     private let maxPoseRad: Float = 0.5
 
-    // 活体(眨眼):跟最大脸的眼开度,先闭后睁判为一次眨眼
+    // 眨眼活体
     private var sawClosed = false
     private var noFaceFrames = 0
 
-    // 时序防闪烁:主脸标签滑窗投票
+    // 时序防闪烁
     private var labelHistory: [String] = []
+
+    // ── 深度活体可调参数(真机标定)──
+    // 真脸有 3D 起伏 → 平面拟合残差大;照片/屏幕(哪怕倾斜)是平面 → 残差小。
+    private let depthResidualThresh: Float = 0.008   // 米;> 此值判真人。太严→真人被拒,太松→照片漏过
+    private let depthMinSamples = 12
+    // 视频前置镜像、深度图通常不镜像 → 采样时水平翻转。若真机发现活体判反了,把它改成 false。
+    private let depthFlipH = true
 
     override init() {
         let dir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first
@@ -80,7 +90,6 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// 点「录入」:先要求活体(防照片),再连采 burstTarget 张合格脸作多模板
     func requestEnroll() {
         guard livenessOK else {
             DispatchQueue.main.async { self.hint = "请正对镜头并眨一下眼 👁 确认是真人" }
@@ -91,7 +100,6 @@ final class CameraModel: NSObject, ObservableObject {
         DispatchQueue.main.async { self.hint = "录入中…保持正脸,轻微转动头部" }
     }
 
-    /// 命名确认后真正录入(一批模板都挂到同一姓名下)
     func enroll(name: String) {
         defer { pendingEnroll = nil }
         guard let vecs = pendingEnroll, !name.isEmpty else { return }
@@ -101,7 +109,6 @@ final class CameraModel: NSObject, ObservableObject {
 
     func cancelEnroll() { pendingEnroll = nil }
 
-    /// 删除 / 改名某人(管理面板用)
     func deletePerson(_ name: String) { engine.removeName(name); refreshEnrolled() }
     func renamePerson(_ old: String, to newName: String) {
         let t = newName.trimmingCharacters(in: .whitespaces)
@@ -109,10 +116,8 @@ final class CameraModel: NSObject, ObservableObject {
         engine.rename(from: old, to: t); refreshEnrolled()
     }
 
-    /// 清空整个录入库
     func resetDB() { engine.clear(); refreshEnrolled() }
 
-    /// 某人有几条模板(管理面板显示用)
     func templateCount(_ name: String) -> Int { Int(engine.templateCount(of: name)) }
 
     private func refreshEnrolled() {
@@ -124,24 +129,60 @@ final class CameraModel: NSObject, ObservableObject {
 
     private func configure() {
         session.beginConfiguration()
-        session.sessionPreset = .high
 
-        let cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+        // 优先 TrueDepth(前置带深度);退回普通前置 / 任意
+        let cam = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front)
+            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
             ?? AVCaptureDevice.default(for: .video)
         if let cam, let input = try? AVCaptureDeviceInput(device: cam), session.canAddInput(input) {
             session.addInput(input)
             device = cam
         }
 
+        let isTrueDepth = (device?.deviceType == .builtInTrueDepthCamera)
+        if isTrueDepth, let cam = device {
+            // 选「支持深度 + 视频分辨率最高」的格式
+            let depthFmts = cam.formats.filter { !$0.supportedDepthDataFormats.isEmpty }
+            if let best = depthFmts.max(by: {
+                CMVideoFormatDescriptionGetDimensions($0.formatDescription).width <
+                CMVideoFormatDescriptionGetDimensions($1.formatDescription).width
+            }), (try? cam.lockForConfiguration()) != nil {
+                cam.activeFormat = best
+                let f32 = best.supportedDepthDataFormats.first {
+                    CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
+                }
+                cam.activeDepthDataFormat = f32 ?? best.supportedDepthDataFormats.first
+                cam.unlockForConfiguration()
+            }
+        } else {
+            session.sessionPreset = .high
+        }
+
         videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.setSampleBufferDelegate(self, queue: frameQueue)
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
         if let conn = videoOutput.connection(with: .video), conn.isVideoMirroringSupported {
             conn.automaticallyAdjustsVideoMirroring = false
-            conn.isVideoMirrored = true   // 前置镜像,和镜像的自拍预览一致
+            conn.isVideoMirrored = true
+        }
+
+        if isTrueDepth, session.canAddOutput(depthOutput) {
+            session.addOutput(depthOutput)
+            depthOutput.isFilteringEnabled = true
+            depthOutput.connection(with: .depthData)?.isEnabled = true
+            depthAvailable = true
         }
 
         session.commitConfiguration()
+
+        // 有深度走「视频+深度同步」;否则退回纯视频回调
+        if depthAvailable {
+            let sync = AVCaptureDataOutputSynchronizer(dataOutputs: [videoOutput, depthOutput])
+            sync.setDelegate(self, queue: frameQueue)
+            synchronizer = sync
+        } else {
+            videoOutput.setSampleBufferDelegate(self, queue: frameQueue)
+        }
+
         session.startRunning()
         setupRotationCoordinatorIfReady()
     }
@@ -169,14 +210,91 @@ final class CameraModel: NSObject, ObservableObject {
             if let conn = self.videoOutput.connection(with: .video), conn.isVideoRotationAngleSupported(angle) {
                 conn.videoRotationAngle = angle
             }
+            // 深度连接同角度旋转,保证与视频帧坐标一致(只差一个水平镜像)
+            if let conn = self.depthOutput.connection(with: .depthData), conn.isVideoRotationAngleSupported(angle) {
+                conn.videoRotationAngle = angle
+            }
         }
     }
 }
 
-extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
+// MARK: - 深度活体
 
-    /// 从 Vision 关键点取 5 个对齐点(图像像素坐标,左下原点),顺序:左眼、右眼、鼻、左嘴角、右嘴角。
-    /// 眼/嘴角按 x 定左右(不靠 Vision 的 left/right 标签,避开镜像歧义)。
+extension CameraModel {
+    /// 解 3x3 线性方程(平面拟合用),Cramer 法则。无解返回 nil。
+    private func solve3x3(_ m: [[Float]], _ r: [Float]) -> (Float, Float, Float)? {
+        func det3(_ a: [[Float]]) -> Float {
+            a[0][0]*(a[1][1]*a[2][2]-a[1][2]*a[2][1])
+          - a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0])
+          + a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0])
+        }
+        let D = det3(m)
+        guard abs(D) > 1e-12 else { return nil }
+        func sub(_ col: Int) -> [[Float]] {
+            var c = m; for i in 0..<3 { c[i][col] = r[i] }; return c
+        }
+        return (det3(sub(0))/D, det3(sub(1))/D, det3(sub(2))/D)
+    }
+
+    /// 在深度图上按人脸框中心区域采样,平面拟合 → 残差。残差大=3D 真人,小=平面假体。
+    /// 返回 (isLive, range米, residual米);样本不足返回 nil。
+    private func depthLiveness(_ depthMap: CVPixelBuffer, faceBox nb: CGRect) -> (Bool, Float, Float)? {
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+        let w = CVPixelBufferGetWidth(depthMap), h = CVPixelBufferGetHeight(depthMap)
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
+        let rowBytes = CVPixelBufferGetBytesPerRow(depthMap)
+
+        func depthAt(_ col: Int, _ row: Int) -> Float? {
+            guard col >= 0, col < w, row >= 0, row < h else { return nil }
+            let p = base.advanced(by: row * rowBytes + col * MemoryLayout<Float32>.size)
+            let d = p.assumingMemoryBound(to: Float32.self).pointee
+            guard d.isFinite, d > 0.05, d < 5.0 else { return nil }   // 合理深度(米)
+            return d
+        }
+
+        // Vision 框:归一化、左下原点、镜像视频空间。深度:同角度旋转、不镜像 → 翻 x;像素行从上 → 翻 y。
+        let cx = nb.midX, cy = nb.midY
+        let rw = nb.width * 0.6, rh = nb.height * 0.6
+        var us: [Float] = [], vs: [Float] = [], ds: [Float] = []
+        let N = 9
+        for i in 0..<N {
+            for j in 0..<N {
+                let fx = cx - rw/2 + rw * CGFloat(i)/CGFloat(N-1)
+                let fy = cy - rh/2 + rh * CGFloat(j)/CGFloat(N-1)
+                let nx = depthFlipH ? (1 - fx) : fx
+                let col = Int(nx * CGFloat(w))
+                let row = Int((1 - fy) * CGFloat(h))
+                if let d = depthAt(col, row) {
+                    us.append(Float(fx)); vs.append(Float(fy)); ds.append(d)
+                }
+            }
+        }
+        guard ds.count >= depthMinSamples else { return nil }
+
+        // 最小二乘平面 d ≈ a·u + b·v + c
+        var Suu: Float = 0, Suv: Float = 0, Su: Float = 0, Svv: Float = 0, Sv: Float = 0
+        var Sud: Float = 0, Svd: Float = 0, Sd: Float = 0
+        let n = Float(ds.count)
+        for k in 0..<ds.count {
+            let u = us[k], v = vs[k], d = ds[k]
+            Suu += u*u; Suv += u*v; Su += u; Svv += v*v; Sv += v
+            Sud += u*d; Svd += v*d; Sd += d
+        }
+        let M = [[Suu, Suv, Su], [Suv, Svv, Sv], [Su, Sv, n]]
+        let R = [Sud, Svd, Sd]
+        guard let (a, b, c) = solve3x3(M, R) else { return nil }
+        var sse: Float = 0
+        for k in 0..<ds.count { let e = ds[k] - (a*us[k] + b*vs[k] + c); sse += e*e }
+        let residual = (sse / n).squareRoot()
+        let range = (ds.max() ?? 0) - (ds.min() ?? 0)
+        return (residual > depthResidualThresh, range, residual)
+    }
+}
+
+// MARK: - 公共处理(视频 ± 深度都汇到这里)
+
+extension CameraModel {
     private func landmarkPoints(_ obs: VNFaceObservation, bufW: CGFloat, bufH: CGFloat) -> [CGPoint]? {
         guard let lm = obs.landmarks else { return nil }
         let sz = CGSize(width: bufW, height: bufH)
@@ -196,7 +314,6 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         return [eyeL, eyeR, nose, mL, mR]
     }
 
-    /// 录入质量门:脸够大(不太远)+ 姿态够正(yaw/roll 在阈内)。识别不受此限制。
     private func qualityOK(_ obs: VNFaceObservation) -> Bool {
         if obs.boundingBox.width < minFaceWidth { return false }
         if let y = obs.yaw?.floatValue, abs(y) > maxPoseRad { return false }
@@ -204,7 +321,6 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         return true
     }
 
-    /// 眼开度(眼轮廓 高/宽 比);睁眼≈0.25+,闭眼≈<0.15。取双眼均值。
     private func eyeOpenness(_ obs: VNFaceObservation) -> Float? {
         guard let lm = obs.landmarks else { return nil }
         func ratio(_ r: VNFaceLandmarkRegion2D?) -> Float? {
@@ -217,7 +333,6 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         return vals.isEmpty ? nil : vals.reduce(0, +) / Float(vals.count)
     }
 
-    /// 用最大脸的眼开度更新活体状态(先闭后睁=一次眨眼);久无脸则失效。
     private func updateLiveness(primary: VNFaceObservation?) {
         if let p = primary, let o = eyeOpenness(p) {
             noFaceFrames = 0
@@ -232,7 +347,6 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         DispatchQueue.main.async { if self.livenessOK != v { self.livenessOK = v } }
     }
 
-    /// 主脸标签滑窗投票:返回出现最多的姓名(仅统计已认出的帧),减少抖动。
     private func smoothedName(_ current: String?) -> String? {
         labelHistory.append(current ?? "")
         if labelHistory.count > 7 { labelHistory.removeFirst() }
@@ -242,10 +356,8 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         return name
     }
 
-    func captureOutput(_ output: AVCaptureOutput,
-                       didOutput sampleBuffer: CMSampleBuffer,
-                       from connection: AVCaptureConnection) {
-        // 节流(检测+编码较重)
+    /// 视频(可选深度)→ 检测/识别/活体 → 发布
+    fileprivate func process(sampleBuffer: CMSampleBuffer, depthMap: CVPixelBuffer?) {
         let now = Date()
         if now.timeIntervalSince(lastProcess) < interval { return }
         lastProcess = now
@@ -259,45 +371,59 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         try? handler.perform([request])
         let observations = request.results ?? []
 
-        // 逐张:5点对齐裁剪 → 编码 → 比对;记录每张脸的姓名/合格录入向量,并挑「最大脸」
-        var built: [(box: CGRect, label: String, recognized: Bool)] = []
-        var names: [String?] = []        // 每脸认出的姓名(nil=未认出)
-        var vecs: [[Float]?] = []        // 每脸的「合格」录入向量(nil=不合格/无关键点)
+        var built: [(box: CGRect, label: String, recognized: Bool, live: Bool?)] = []
+        var names: [String?] = []
+        var vecs: [[Float]?] = []
         var maxIdx = -1; var maxArea: CGFloat = -1
+        var dbg = ""
 
         for (i, obs) in observations.enumerated() {
             let nb = obs.boundingBox
             let area = nb.width * nb.height
             if area > maxArea { maxArea = area; maxIdx = i }
 
+            // 深度活体(每张脸)
+            var live: Bool? = nil
+            if let dm = depthMap, let (isLive, rng, res) = depthLiveness(dm, faceBox: nb) {
+                live = isLive
+                if area >= maxArea { dbg = String(format: "深度 range=%.3f res=%.3f → %@", rng, res, isLive ? "真人" : "平面") }
+            }
+
             var label = "模型未加载"
             var recognized = false
             var nm: String? = nil
             var qvec: [Float]? = nil
 
-            // 只走「5点对齐」这一条路,保证录入/查询向量永远同一空间(跨尺寸一致)。
             if let embedder, let pts = landmarkPoints(obs, bufW: bufW, bufH: bufH),
                let vec = embedder.embedAligned(pixelBuffer: pixelBuffer, src5: pts) {
                 let match = engine.findBest(vec.map { NSNumber(value: $0) })
-                recognized = (match?.score ?? -2) >= threshold
+                let hit = (match?.score ?? -2) >= threshold
                 if let m = match {
-                    label = recognized ? String(format: "%@ %.2f", m.name, m.score)
-                                       : String(format: "陌生人 %.2f", m.score)
-                    if recognized { nm = m.name }
+                    let liveMark = live == true ? " ·活体" : (live == false ? " ·假体⚠" : "")
+                    if hit {
+                        // 门控模式:假体不给身份
+                        if gateMode && live == false {
+                            label = "假体 ⚠"; recognized = false
+                        } else {
+                            label = String(format: "%@ %.2f%@", m.name, m.score, liveMark)
+                            recognized = !(gateMode && live == false)
+                            nm = recognized ? m.name : nil
+                        }
+                    } else {
+                        label = String(format: "陌生人 %.2f%@", m.score, liveMark)
+                    }
                 } else {
                     label = "库为空"
                 }
-                if qualityOK(obs) { qvec = vec }   // 录入只收合格(够大够正)的脸
+                if qualityOK(obs) { qvec = vec }
             } else {
                 label = "靠近 · 正对镜头"
             }
-            built.append((nb, label, recognized)); names.append(nm); vecs.append(qvec)
+            built.append((nb, label, recognized, live)); names.append(nm); vecs.append(qvec)
         }
 
-        // 活体:用最大脸的眨眼更新
         updateLiveness(primary: maxIdx >= 0 ? observations[maxIdx] : nil)
 
-        // 多帧录入:每帧收主脸的合格向量,够 burstTarget 张就交界面命名
         if burstRemaining > 0, maxIdx >= 0, let v = vecs[maxIdx] {
             burstVecs.append(v)
             burstRemaining -= 1
@@ -307,7 +433,6 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         }
 
-        // 时序防闪烁:主脸姓名滑窗投票,稳定后覆盖显示
         if maxIdx >= 0, let sm = smoothedName(names[maxIdx]) {
             built[maxIdx].label = sm + " ✓"
             built[maxIdx].recognized = true
@@ -315,9 +440,9 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             _ = smoothedName(nil)
         }
 
-        // 归一化框 → 屏幕坐标(复刻预览 .resizeAspectFill),发布
         DispatchQueue.main.async { [weak self] in
             guard let self, let layer = self.previewLayer else { return }
+            self.depthDebug = dbg
             let vw = layer.bounds.width, vh = layer.bounds.height
             let scale = max(vw / bufW, vh / bufH)
             let sw = bufW * scale, sh = bufH * scale
@@ -329,8 +454,33 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
                                 width: b.box.width * sw,
                                 height: b.box.height * sh),
                     label: b.label,
-                    recognized: b.recognized)
+                    recognized: b.recognized,
+                    live: b.live)
             }
         }
+    }
+}
+
+// 纯视频回调(无深度设备的兜底)
+extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        process(sampleBuffer: sampleBuffer, depthMap: nil)
+    }
+}
+
+// 视频+深度同步回调(TrueDepth)
+extension CameraModel: AVCaptureDataOutputSynchronizerDelegate {
+    func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
+                                didOutput collection: AVCaptureSynchronizedDataCollection) {
+        guard let v = collection.synchronizedData(for: videoOutput) as? AVCaptureSynchronizedSampleBufferData,
+              !v.sampleBufferWasDropped else { return }
+        var depthMap: CVPixelBuffer? = nil
+        if let d = collection.synchronizedData(for: depthOutput) as? AVCaptureSynchronizedDepthData,
+           !d.depthDataWasDropped {
+            let conv = d.depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+            depthMap = conv.depthDataMap
+        }
+        process(sampleBuffer: v.sampleBuffer, depthMap: depthMap)
     }
 }
