@@ -10,8 +10,8 @@
 [![Engine](https://img.shields.io/badge/engine-C%2B%2B17-lightgrey.svg)](FaceID/FaceEngine.hpp)
 [![License](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 
-<!-- TODO(demo): 录一段真机演示导出成 GIF 放到 docs/demo.gif -->
-<img src="docs/demo.gif" alt="Demo" width="280"/>
+<!-- Demo:录一段真机演示存成 docs/demo.gif(见 docs/HOWTO-demo.md),然后取消下面一行的注释 -->
+<!-- <img src="docs/demo.gif" alt="Demo" width="280"/> -->
 
 </div>
 
