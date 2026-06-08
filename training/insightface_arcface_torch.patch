@@ -1,0 +1,103 @@
+diff --git a/recognition/arcface_torch/dataset.py b/recognition/arcface_torch/dataset.py
+index 6cdbdcf..1feedcf 100644
+--- a/recognition/arcface_torch/dataset.py
++++ b/recognition/arcface_torch/dataset.py
+@@ -4,7 +4,10 @@ import queue as Queue
+ import threading
+ from typing import Iterable
+ 
+-import mxnet as mx
++try:
++    import mxnet as mx
++except Exception:
++    mx = None
+ import numpy as np
+ import torch
+ from functools import partial
+@@ -31,6 +34,11 @@ def get_dataloader(
+     train_set = None
+ 
+     # Synthetic
++    import glob as _glob
++    _shards = _glob.glob(os.path.join(root_dir, "*.tar*")) if root_dir != "synthetic" else []
++    if _shards:
++        from wds_loader import get_wds_dataloader
++        return get_wds_dataloader(root_dir, local_rank, batch_size, num_workers=num_workers, seed=seed)
+     if root_dir == "synthetic":
+         train_set = SyntheticDataset()
+         dali = False
+diff --git a/recognition/arcface_torch/eval/verification.py b/recognition/arcface_torch/eval/verification.py
+index edacf8d..b57785e 100644
+--- a/recognition/arcface_torch/eval/verification.py
++++ b/recognition/arcface_torch/eval/verification.py
+@@ -28,11 +28,17 @@ import datetime
+ import os
+ import pickle
+ 
+-import mxnet as mx
++try:
++    import mxnet as mx
++except Exception:
++    mx = None
+ import numpy as np
+ import sklearn
+ import torch
+-from mxnet import ndarray as nd
++try:
++    from mxnet import ndarray as nd
++except Exception:
++    nd = None
+ from scipy import interpolate
+ from sklearn.decomposition import PCA
+ from sklearn.model_selection import KFold
+diff --git a/recognition/arcface_torch/onnx_ijbc.py b/recognition/arcface_torch/onnx_ijbc.py
+index 31c491b..dde9dd0 100644
+--- a/recognition/arcface_torch/onnx_ijbc.py
++++ b/recognition/arcface_torch/onnx_ijbc.py
+@@ -4,7 +4,10 @@ import pickle
+ import timeit
+ 
+ import cv2
+-import mxnet as mx
++try:
++    import mxnet as mx
++except Exception:
++    mx = None
+ import numpy as np
+ import pandas as pd
+ import prettytable
+diff --git a/recognition/arcface_torch/scripts/shuffle_rec.py b/recognition/arcface_torch/scripts/shuffle_rec.py
+index f3b68e9..7a990bd 100644
+--- a/recognition/arcface_torch/scripts/shuffle_rec.py
++++ b/recognition/arcface_torch/scripts/shuffle_rec.py
+@@ -3,7 +3,10 @@ import multiprocessing
+ import os
+ import time
+ 
+-import mxnet as mx
++try:
++    import mxnet as mx
++except Exception:
++    mx = None
+ import numpy as np
+ 
+ 
+diff --git a/recognition/arcface_torch/torch2onnx.py b/recognition/arcface_torch/torch2onnx.py
+index f6055d1..3b44d33 100644
+--- a/recognition/arcface_torch/torch2onnx.py
++++ b/recognition/arcface_torch/torch2onnx.py
+@@ -6,12 +6,12 @@ import torch
+ def convert_onnx(net, path_module, output, opset=11, simplify=False):
+     assert isinstance(net, torch.nn.Module)
+     img = np.random.randint(0, 255, size=(112, 112, 3), dtype=np.int32)
+-    img = img.astype(np.float)
++    img = img.astype(np.float32)
+     img = (img / 255. - 0.5) / 0.5  # torch style norm
+     img = img.transpose((2, 0, 1))
+     img = torch.from_numpy(img).unsqueeze(0).float()
+ 
+-    weight = torch.load(path_module)
++    weight = torch.load(path_module, map_location="cpu")
+     net.load_state_dict(weight, strict=True)
+     net.eval()
+     torch.onnx.export(net, img, output, input_names=["data"], keep_initializers_as_inputs=False, verbose=False, opset_version=opset)
