@@ -255,10 +255,11 @@ extension CameraModel {
         }
 
         // Vision 框:归一化、左下原点、镜像视频空间。深度:同角度旋转、不镜像 → 翻 x;像素行从上 → 翻 y。
+        // 只取脸/屏中心 ~45% 区域,密集采样,尽量落在同一个表面上(少碰手机边框/背景)。
         let cx = nb.midX, cy = nb.midY
-        let rw = nb.width * 0.6, rh = nb.height * 0.6
+        let rw = nb.width * 0.45, rh = nb.height * 0.45
         var us: [Float] = [], vs: [Float] = [], ds: [Float] = []
-        let N = 9
+        let N = 11
         for i in 0..<N {
             for j in 0..<N {
                 let fx = cx - rw/2 + rw * CGFloat(i)/CGFloat(N-1)
@@ -273,12 +274,21 @@ extension CameraModel {
         }
         guard ds.count >= depthMinSamples else { return nil }
 
-        // 最小二乘平面 d ≈ a·u + b·v + c
+        // 去背景/边缘:只留靠近中位深度 ±0.08m 的样本(把手机边框外的远景剔掉,
+        // 否则「近平面屏 + 远背景」会把平面残差撑大、误判成 3D 真人)。
+        let md = ds.sorted()[ds.count / 2]
+        var fu: [Float] = [], fv: [Float] = [], fd: [Float] = []
+        for k in 0..<ds.count where abs(ds[k] - md) < 0.08 {
+            fu.append(us[k]); fv.append(vs[k]); fd.append(ds[k])
+        }
+        guard fd.count >= depthMinSamples else { return nil }
+
+        // 最小二乘平面 d ≈ a·u + b·v + c(在过滤后的同一表面上)
         var Suu: Float = 0, Suv: Float = 0, Su: Float = 0, Svv: Float = 0, Sv: Float = 0
         var Sud: Float = 0, Svd: Float = 0, Sd: Float = 0
-        let n = Float(ds.count)
-        for k in 0..<ds.count {
-            let u = us[k], v = vs[k], d = ds[k]
+        let n = Float(fd.count)
+        for k in 0..<fd.count {
+            let u = fu[k], v = fv[k], d = fd[k]
             Suu += u*u; Suv += u*v; Su += u; Svv += v*v; Sv += v
             Sud += u*d; Svd += v*d; Sd += d
         }
@@ -286,9 +296,9 @@ extension CameraModel {
         let R = [Sud, Svd, Sd]
         guard let (a, b, c) = solve3x3(M, R) else { return nil }
         var sse: Float = 0
-        for k in 0..<ds.count { let e = ds[k] - (a*us[k] + b*vs[k] + c); sse += e*e }
+        for k in 0..<fd.count { let e = fd[k] - (a*fu[k] + b*fv[k] + c); sse += e*e }
         let residual = (sse / n).squareRoot()
-        let range = (ds.max() ?? 0) - (ds.min() ?? 0)
+        let range = (fd.max() ?? 0) - (fd.min() ?? 0)
         return (residual > depthResidualThresh, range, residual)
     }
 }
