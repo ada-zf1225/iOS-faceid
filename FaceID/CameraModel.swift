@@ -409,9 +409,9 @@ extension CameraModel {
                 dbg = String(format: "深度 res=%.3f range=%.3f", res, rng)
             }
             if let pad, let sp = pad.spoofProbability(pixelBuffer: pixelBuffer, normalizedBox: boxes[maxIdx]) {
-                let cnnLive = sp < 0.5
-                let dl = live[maxIdx]
-                live[maxIdx] = (dl == nil) ? cnnLive : (dl! && cnnLive)
+                // 有深度时以深度为准:它直接防平面/视频回放,且不受 CelebA-Spoof→iPad 自拍的域差影响。
+                // CNN 仅在无深度设备上决定活体(有深度时只展示,不否决,避免对真实自拍误报)。
+                if live[maxIdx] == nil { live[maxIdx] = sp < 0.5 }
                 dbg += String(format: "  CNN spoof=%.2f", sp)
             }
         }
