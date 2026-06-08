@@ -34,15 +34,22 @@ RES  = os.path.join(HERE, "results")
 os.makedirs(WORK, exist_ok=True); os.makedirs(RES, exist_ok=True)
 
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+# 模型路径可用环境变量覆盖(方便在 HX2 上跑:重计算应在 GPU 节点,而非本地 Mac)。
+R50_ONNX = os.environ.get("FACEID_R50_ONNX", os.path.join(REPO, "tools", "r50_glint_robust.onnx"))
+MBF_ONNX = os.environ.get("FACEID_MBF_ONNX", os.path.expanduser("~/.insightface/models/buffalo_s/w600k_mbf.onnx"))
+CTX_ID   = int(os.environ.get("FACEID_CTX", "-1"))   # -1=CPU(Mac);0=GPU(HX2)
 MODELS = {
-    "ResNet-50 (ours)":        (os.path.join(REPO, "tools", "r50_glint_robust.onnx"), "data"),
-    "MobileFaceNet (baseline)": (os.path.expanduser("~/.insightface/models/buffalo_s/w600k_mbf.onnx"), "input.1"),
+    "ResNet-50 (ours)":         (R50_ONNX, "data"),
+    "MobileFaceNet (baseline)": (MBF_ONNX, "input.1"),
 }
 COLORS = {"ResNet-50 (ours)": "#d62728", "MobileFaceNet (baseline)": "#1f77b4"}
 
 # ----------------------------------------------------------------------------- models / alignment
 def load_model(path, inp):
-    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    # 有 CUDA 就用(HX2),否则回退 CPU(Mac)
+    provs = (["CUDAExecutionProvider", "CPUExecutionProvider"] if CTX_ID >= 0
+             else ["CPUExecutionProvider"])
+    sess = ort.InferenceSession(path, providers=provs)
     return {"sess": sess, "inp": inp, "out": sess.get_outputs()[0].name}
 
 def embed(model, crop_rgb_u8):
@@ -60,7 +67,7 @@ def detector():
     if _detector is None:
         from insightface.app import FaceAnalysis
         _detector = FaceAnalysis(name="buffalo_s", allowed_modules=["detection"])
-        _detector.prepare(ctx_id=-1, det_size=(640, 640))   # ctx_id=-1 => CPU
+        _detector.prepare(ctx_id=CTX_ID, det_size=(640, 640))   # -1=CPU, 0=GPU
     return _detector
 
 def to_u8_rgb(img):
@@ -103,6 +110,25 @@ def degrade_occlude(crop, frac):
     return c
 
 # ----------------------------------------------------------------------------- metrics
+def kfold_accuracy(scores, y, folds=10):
+    """标准 LFW 10 折协议:每折在其余 9 折上选最佳阈值,在该折上评估 → 准确率 mean±std。
+    比「在全集上挑最佳阈值」更诚实(避免在测试集上调阈值)。"""
+    n = len(y)
+    idx = np.arange(n)
+    fold_sz = n // folds
+    accs, thrs = [], []
+    cand = np.unique(scores)
+    for f in range(folds):
+        test = idx[f*fold_sz : (f+1)*fold_sz] if f < folds-1 else idx[f*fold_sz:]
+        train = np.setdiff1d(idx, test)
+        ytr, str_ = y[train], scores[train]
+        best_t, best_a = 0.0, 0.0
+        for t in cand:
+            a = np.mean((str_ >= t) == ytr)
+            if a > best_a: best_a, best_t = a, t
+        accs.append(float(np.mean((scores[test] >= best_t) == y[test]))); thrs.append(float(best_t))
+    return float(np.mean(accs)), float(np.std(accs)), float(np.mean(thrs))
+
 def metrics(y, scores):
     fpr, tpr, thr = roc_curve(y, scores)
     roc_auc = auc(fpr, tpr)
@@ -163,11 +189,14 @@ def main():
         embA[name], embB[name] = ea, eb
         scores = np.sum(ea * eb, axis=1)              # 余弦(已归一化)
         mt = metrics(y, scores)
+        kacc, kstd, kthr = kfold_accuracy(scores, y)  # 标准 LFW 10 折协议
+        mt["kfold_acc"], mt["kfold_std"], mt["kfold_thr"] = kacc, kstd, kthr
         results[name] = mt
         np.save(os.path.join(WORK, f"scores_{name.split()[0]}.npy"), scores)
         print(f"\n=== {name} ===")
+        print(f"  10折准确率={kacc*100:.2f}%±{kstd*100:.2f}% @thr≈{kthr:.3f}  (标准 LFW 协议)")
         print(f"  AUC={mt['auc']:.4f}  EER={mt['eer']*100:.2f}%  "
-              f"最佳准确率={mt['best_acc']*100:.2f}% @thr={mt['best_thr']:.3f}")
+              f"全集最佳准确率={mt['best_acc']*100:.2f}% @thr={mt['best_thr']:.3f}")
         print(f"  TAR@FAR=1e-2={mt['tar_far1e2']*100:.2f}%  TAR@FAR=1e-3={mt['tar_far1e3']*100:.2f}%")
         print(f"  同人余弦={mt['gen_mean']:.3f}±{mt['gen_std']:.3f}  "
               f"陌生人={mt['imp_mean']:.3f}±{mt['imp_std']:.3f}")
@@ -197,8 +226,9 @@ def main():
     axes[0].set_ylabel("count"); plt.tight_layout()
     plt.savefig(os.path.join(RES, "score_dist.png"), dpi=150); plt.close()
 
-    # ---- 鲁棒性:只用同人对,退化 B,看同人余弦均值 ----
+    # ---- 鲁棒性:只用同人对,退化 B,看同人余弦均值(采样上限,控大集运行时间)----
     gidx = np.where(y == 1)[0]
+    if len(gidx) > 500: gidx = gidx[:500]
     scale_px = [112, 64, 48, 32, 24, 16]
     occ_frac = [0.0, 0.1, 0.2, 0.3, 0.4]
     rob = {"scale": {}, "occ": {}}
@@ -229,20 +259,21 @@ def main():
     # ---- 写 RESULTS.md ----
     def row(name):
         m = results[name]
-        return (f"| {name} | {m['auc']:.4f} | {m['eer']*100:.2f}% | {m['best_acc']*100:.2f}% "
-                f"| {m['best_thr']:.3f} | {m['tar_far1e3']*100:.2f}% "
+        return (f"| {name} | {m['kfold_acc']*100:.2f}%±{m['kfold_std']*100:.2f}% | {m['auc']:.4f} "
+                f"| {m['eer']*100:.2f}% | {m['tar_far1e3']*100:.2f}% "
                 f"| {m['gen_mean']:.3f}±{m['gen_std']:.3f} | {m['imp_mean']:.3f}±{m['imp_std']:.3f} |")
     lines = [
         "# Evaluation results",
         "",
         f"Benchmark: **LFW** verification, `subset={args.subset}` ({n} pairs). "
         "Faces detected + 5-point aligned with the same InsightFace template the iOS app uses. "
-        "Embeddings from the exported ONNX (numerically ≡ the shipped fp16 Core ML, cosine 0.9984).",
+        "Embeddings from the exported ONNX (numerically ≡ the shipped fp16 Core ML, cosine 0.9984). "
+        "Accuracy is the standard **10-fold** protocol (threshold chosen on 9 folds, tested on the 10th).",
         "",
         "## Verification accuracy",
         "",
-        "| Model | AUC | EER | Best acc | Best thr | TAR@FAR=1e-3 | genuine cos | impostor cos |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Model | 10-fold acc | AUC | EER | TAR@FAR=1e-3 | genuine cos | impostor cos |",
+        "|---|---|---|---|---|---|---|",
         row("MobileFaceNet (baseline)"),
         row("ResNet-50 (ours)"),
         "",
