@@ -55,8 +55,10 @@ final class FaceEmbedder {
         let aligned = CIImage(cvPixelBuffer: pixelBuffer).transformed(by: t)
         guard let cg = ciContext.createCGImage(
             aligned, from: CGRect(x: 0, y: 0, width: inputSize, height: inputSize)) else { return nil }
-        guard let input = preprocess(cgImage: cg) else { return nil }
-        return run(input)
+        // 测试时翻转增强(TTA):脸 + 水平镜像各编码取平均 → 嵌入更稳。引擎再 L2 归一化。
+        guard let i0 = preprocess(cgImage: cg, flip: false), let v0 = run(i0) else { return nil }
+        guard let i1 = preprocess(cgImage: cg, flip: true), let v1 = run(i1) else { return v0 }
+        return zip(v0, v1).map { ($0 + $1) * 0.5 }
     }
 
     /// 兜底路径:无关键点时按 Vision 框裁剪(左下原点归一化框)。
@@ -89,8 +91,8 @@ final class FaceEmbedder {
         return (0..<arr.count).map { Float(truncating: arr[$0]) }
     }
 
-    /// 112×112 CGImage → RGB → (x-127.5)/127.5 → MLMultiArray[1,3,112,112] (NCHW)
-    private func preprocess(cgImage: CGImage) -> MLMultiArray? {
+    /// 112×112 CGImage → RGB → (x-127.5)/127.5 → MLMultiArray[1,3,112,112] (NCHW)。flip=水平镜像(TTA)。
+    private func preprocess(cgImage: CGImage, flip: Bool = false) -> MLMultiArray? {
         let s = inputSize
         var rgba = [UInt8](repeating: 0, count: s * s * 4)
         let cs = CGColorSpaceCreateDeviceRGB()
@@ -102,10 +104,14 @@ final class FaceEmbedder {
             shape: [1, 3, NSNumber(value: s), NSNumber(value: s)], dataType: .float32) else { return nil }
         let plane = s * s
         let ptr = arr.dataPointer.bindMemory(to: Float32.self, capacity: 3 * plane)
-        for p in 0..<plane {
-            ptr[0 * plane + p] = (Float32(rgba[p * 4])     - 127.5) / 127.5
-            ptr[1 * plane + p] = (Float32(rgba[p * 4 + 1]) - 127.5) / 127.5
-            ptr[2 * plane + p] = (Float32(rgba[p * 4 + 2]) - 127.5) / 127.5
+        for row in 0..<s {
+            for col in 0..<s {
+                let src = (row * s + (flip ? (s - 1 - col) : col)) * 4   // 翻转=读镜像列
+                let dst = row * s + col
+                ptr[0 * plane + dst] = (Float32(rgba[src])     - 127.5) / 127.5
+                ptr[1 * plane + dst] = (Float32(rgba[src + 1]) - 127.5) / 127.5
+                ptr[2 * plane + dst] = (Float32(rgba[src + 2]) - 127.5) / 127.5
+            }
         }
         return arr
     }

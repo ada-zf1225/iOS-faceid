@@ -47,8 +47,10 @@ final class CameraModel: NSObject, ObservableObject {
     private let minFaceWidth: CGFloat = 0.14
     private let maxPoseRad: Float = 0.5
 
-    // 时序防闪烁
-    private var labelHistory: [String] = []
+    // 多脸跟踪 + 逐脸时序防闪烁(IoU 关联,每条轨迹各自投票)
+    private struct Track { var box: CGRect; var history: [String]; var missed: Int }
+    private var tracks: [Int: Track] = [:]
+    private var nextTrackId = 0
 
     override init() {
         let dir = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first
@@ -187,14 +189,44 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         return true
     }
 
-    /// 主脸标签滑窗投票:返回出现最多的姓名(仅统计认出的帧),减少抖动。
-    private func smoothedName(_ current: String?) -> String? {
-        labelHistory.append(current ?? "")
-        if labelHistory.count > 7 { labelHistory.removeFirst() }
-        var tally: [String: Int] = [:]
-        for s in labelHistory where !s.isEmpty { tally[s, default: 0] += 1 }
-        guard let (name, n) = tally.max(by: { $0.value < $1.value }), n >= 3 else { return nil }
-        return name
+    private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let inter = a.intersection(b)
+        if inter.isNull { return 0 }
+        let ia = inter.width * inter.height
+        return ia / (a.width*a.height + b.width*b.height - ia)
+    }
+
+    /// 把本帧每张脸按 IoU 关联到已有轨迹(无则新建),各轨迹独立做姓名滑窗投票。
+    /// 返回每张脸的稳定姓名(出现≥3 次才认,否则 nil)。
+    private func trackAndSmooth(boxes: [CGRect], names: [String?]) -> [String?] {
+        var result = [String?](repeating: nil, count: boxes.count)
+        var used = Set<Int>()
+        var assigned = [Int](repeating: -1, count: boxes.count)
+        for i in 0..<boxes.count {
+            var bestId = -1; var best: CGFloat = 0.3
+            for (id, tr) in tracks where !used.contains(id) {
+                let o = iou(boxes[i], tr.box)
+                if o > best { best = o; bestId = id }
+            }
+            if bestId < 0 { bestId = nextTrackId; nextTrackId += 1; tracks[bestId] = Track(box: boxes[i], history: [], missed: 0) }
+            used.insert(bestId); assigned[i] = bestId
+        }
+        for i in 0..<boxes.count {
+            let id = assigned[i]
+            var tr = tracks[id]!
+            tr.box = boxes[i]; tr.missed = 0
+            tr.history.append(names[i] ?? "")
+            if tr.history.count > 7 { tr.history.removeFirst() }
+            tracks[id] = tr
+            var tally: [String: Int] = [:]
+            for s in tr.history where !s.isEmpty { tally[s, default: 0] += 1 }
+            if let (nm, c) = tally.max(by: { $0.value < $1.value }), c >= 3 { result[i] = nm }
+        }
+        for id in Array(tracks.keys) where !used.contains(id) {
+            tracks[id]!.missed += 1
+            if tracks[id]!.missed > 8 { tracks.removeValue(forKey: id) }
+        }
+        return result
     }
 
     func captureOutput(_ output: AVCaptureOutput,
@@ -256,12 +288,11 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         }
 
-        // 时序防闪烁(主脸)
-        if maxIdx >= 0, let sm = smoothedName(names[maxIdx]) {
-            built[maxIdx].label = sm + " ✓"
-            built[maxIdx].recognized = true
-        } else if maxIdx < 0 {
-            _ = smoothedName(nil)
+        // 多脸跟踪 + 逐脸时序投票(每张脸都稳,不只主脸)
+        let smoothed = trackAndSmooth(boxes: built.map { $0.box }, names: names)
+        for i in 0..<built.count where smoothed[i] != nil {
+            built[i].label = smoothed[i]! + " ✓"
+            built[i].recognized = true
         }
 
         DispatchQueue.main.async { [weak self] in
