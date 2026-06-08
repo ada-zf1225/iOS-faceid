@@ -3,5 +3,8 @@
 # 留在普通 git 里便于 diff 与审阅。
 *.bin filter=lfs diff=lfs merge=lfs -text
 
+# Demo GIF 较大(~8MB)→ 也走 LFS(GitHub 仍能在 README 内联渲染)
+*.gif filter=lfs diff=lfs merge=lfs -text
+
 # 让 GitHub 语言统计忽略评测数据目录
 tools/eval/data/** linguist-vendored
