@@ -149,30 +149,39 @@ Full recipe, augmentation rationale, and one-command reproduction in [`training/
 
 ## Evaluation
 
-Measured on **LFW** verification (1000 pairs), with faces detected and 5-point aligned using the
-**same template the app uses**, embeddings from the exported ONNX (≡ shipped fp16 Core ML, cosine
-0.9984). Full report + plots: [`tools/eval/RESULTS.md`](tools/eval/results/RESULTS.md) — reproduce
-with `python tools/eval/evaluate.py`.
+### Standard benchmarks (10-fold accuracy)
 
-| Model | AUC | EER | Acc | genuine cos | impostor cos |
-|---|---|---|---|---|---|
-| MobileFaceNet (baseline) | 0.9963 | 1.40% | 99.10% | 0.613 ± 0.130 | 0.004 ± 0.069 |
-| **ResNet-50 (ours)** | **0.9976** | **1.20%** | **99.30%** | **0.681 ± 0.123** | **−0.002 ± 0.054** |
+On the canonical InsightFace verification sets (pre-aligned 112×112, flip-TTA, standard 10-fold
+protocol; same exported ONNX as the app), the self-trained ResNet-50 beats the MobileFaceNet
+baseline on **every** benchmark — by the widest margin on **cross-pose** and **cross-age**, exactly
+where robustness matters:
 
-The self-trained model wins across the board and, crucially, **holds up better under the two
-failure modes it was trained for**. Under simulated eye-region occlusion (glasses/mask proxy) its
-advantage over the baseline *grows* with severity:
+| Benchmark | MobileFaceNet (baseline) | ResNet-50 (ours) |
+|---|---|---|
+| LFW (6000 pairs) | 99.60% ± 0.25% | **99.77% ± 0.26%** |
+| CFP-FP — cross-pose (7000) | 96.01% ± 1.10% | **97.44% ± 0.95%** |
+| AgeDB-30 — cross-age (6000) | 96.35% ± 0.63% | **98.10% ± 0.73%** |
+
+<p align="center"><img src="tools/eval/results/benchmarks.png" width="62%"/></p>
+
+Reproduce: `python tools/eval/eval_bins.py` (InsightFace `.bin` sets — pre-aligned, so no detection
+needed).
+
+### Robustness stress test (the project's thesis)
+
+A separate detection-based pass ([`evaluate.py`](tools/eval/evaluate.py)) degrades genuine pairs to
+probe the two failure modes the model was trained for. Under simulated eye-region occlusion
+(glasses/mask proxy) the self-trained model's genuine-cosine advantage *grows* with severity — the
+random-erasing augmentation paying off:
 
 | genuine cosine @ occlusion | 0% | 10% | 20% | 30% | 40% |
 |---|---|---|---|---|---|
 | MobileFaceNet | 0.613 | 0.524 | 0.450 | 0.384 | 0.294 |
 | **ResNet-50 (ours)** | **0.681** | **0.611** | **0.536** | **0.482** | **0.391** |
 
-<p align="center"><img src="tools/eval/results/roc.png" width="46%"/> <img src="tools/eval/results/robustness_occlusion.png" width="46%"/></p>
+<p align="center"><img src="tools/eval/results/robustness_occlusion.png" width="48%"/></p>
 
-> LFW's EER threshold sits near 0.19; the app defaults to a more conservative **0.35** (in-the-wild
-> glasses/pose lower genuine scores) with a live slider to retune. Stranger scores cluster at ≈0,
-> leaving comfortable margin.
+> The app defaults the cosine threshold to 0.35 (with a live slider); stranger scores cluster at ≈0.
 
 ## Roadmap
 
