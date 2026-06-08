@@ -1,0 +1,57 @@
+# ── macOS ──
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# ── Xcode ──
+## User-specific
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+## Build / derived
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+## Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+Package.resolved
+
+## CocoaPods / Carthage (未用,留作保险)
+Pods/
+Carthage/Build/
+
+## fastlane
+fastlane/report.xml
+fastlane/screenshots/**/*.png
+
+# ── Python (tools/ 与 training/ 用)──
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+*.egg-info/
+
+# ── 模型中间产物(可由 tools/onnx_to_coreml.py 重生成,绝不进 git)──
+*.onnx
+*.pt
+*.pth
+tools/*.onnx
+
+# ── 评测产物(图表可重生成;保留 README 引用的最终图见 .gitignore 例外)──
+tools/eval/_work/
+tools/eval/*.npy
+
+# 说明:.mlpackage 走 Git LFS(见 .gitattributes),不在此忽略。

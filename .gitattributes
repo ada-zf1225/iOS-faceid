@@ -1,0 +1,7 @@
+# Core ML 权重很大(ArcFaceR50.mlpackage 里的 weight.bin ~87MB)→ 走 Git LFS。
+# 同 bundle 内的 model.mlmodel(~130KB)/ Manifest.json(<1KB)足够小,
+# 留在普通 git 里便于 diff 与审阅。
+*.bin filter=lfs diff=lfs merge=lfs -text
+
+# 让 GitHub 语言统计忽略评测数据目录
+tools/eval/data/** linguist-vendored
