@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  engine-tests:
+    name: C++ engine unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build & run engine tests
+        run: make -C engine test CXX=g++
+      - name: Build the CLI
+        run: make -C engine cli CXX=g++
+
+  ios-build:
+    name: iOS build (simulator, no signing)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true                       # pull the Core ML weights stored in Git LFS
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild -project FaceID.xcodeproj -scheme FaceID \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build

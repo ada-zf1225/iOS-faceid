@@ -190,6 +190,19 @@ Next:
 - [ ] Robust on-device liveness with a proper per-device calibration flow
 - [ ] Approximate nearest-neighbor index for large galleries
 
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push:
+
+- **engine-tests** (Ubuntu) — compiles `engine/` against the shipped `FaceEngine.cpp` and runs the
+  22 unit tests + builds the CLI. This is the project's real logic coverage, and it's
+  platform-independent (no Apple toolchain), reinforcing the reusable-engine design.
+- **ios-build** (macOS) — checks out with Git LFS and builds the app for the iOS Simulator
+  (no signing), verifying the Swift / Core ML / Objective-C++ all compile.
+
+<!-- After creating the GitHub remote, add the badge:
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml) -->
+
 ## Tech stack
 
 `Swift 6` · `SwiftUI` · `AVFoundation` · `Vision` · `Core ML` · `C++17` · `Objective-C++` · `PyTorch` · `InsightFace / arcface_torch` · `coremltools`
