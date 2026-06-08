@@ -63,7 +63,6 @@ tools/eval/*.npy
 
 # ── 本地编辑器 / LSP / 工具(含机器专属绝对路径,不进 git)──
 .vscode/
-.claude/
 .compile
 buildServer.json
 **/compile_commands.json
